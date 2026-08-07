@@ -634,6 +634,37 @@ gid_resolve <- function(pairs_matched, all_ids, linkage = c("single", "complete"
 }
 
 
+#' Collapse replicate genotypes to one consensus call per sample, using the
+#' multi-tube rule of Taberlet et al. (1996): a heterozygote is accepted once
+#' two replicates show it, a homozygote only when hom_n replicates agree,
+#' because a homozygote can be manufactured by dropout and a heterozygote
+#' cannot.
+gid_consensus_from_reps <- function(rep_gt, rep_sample, hom_n = 3, het_n = 2) {
+  samples <- unique(as.character(rep_sample))
+  out <- matrix(NA_character_, length(samples), ncol(rep_gt),
+                dimnames = list(samples, colnames(rep_gt)))
+  idx <- split(seq_along(rep_sample), factor(as.character(rep_sample), levels = samples))
+  for (s in samples) for (L in colnames(rep_gt)) {
+    v <- rep_gt[idx[[s]], L]; v <- v[!is.na(v)]
+    if (!length(v)) next
+    tb  <- table(v)
+    het <- names(tb)[vapply(names(tb), function(z) {
+      a <- strsplit(z, "/", fixed = TRUE)[[1]]; a[1] != a[2] }, TRUE)]
+    if (length(het) && max(tb[het]) >= het_n) {
+      out[s, L] <- het[which.max(tb[het])]; next
+    }
+    ## two alleles each seen in het_n replicates also make a heterozygote
+    ac <- table(unlist(lapply(v, function(z) unique(strsplit(z, "/", fixed = TRUE)[[1]]))))
+    if (sum(ac >= het_n) == 2) {
+      out[s, L] <- paste(sort(names(ac)[ac >= het_n]), collapse = "/"); next
+    }
+    hom <- setdiff(names(tb), het)
+    if (length(hom) && max(tb[hom]) >= hom_n) out[s, L] <- hom[which.max(tb[hom])]
+  }
+  out
+}
+
+
 #' Run any of the methods separately within groups (species, study area, year)
 #' and glue the answers back together with globally unique individual IDs.
 #'
@@ -1076,11 +1107,154 @@ gid_lr_table <- function(p, dict, dropout, false_allele, k) {
 #' @param prior_same prior probability that a random pair of samples is the
 #'   same individual. Defaults to a self-consistent estimate from the data.
 #' @param post_cut posterior probability required to declare a match.
+# =============================================================================
+# 9a. USING PCR REPLICATES DIRECTLY INSTEAD OF A CONSENSUS
+# =============================================================================
+#
+# A consensus genotype is a decision made before the analysis starts, and every
+# decision throws information away. A locus where two replicates said A/G and
+# one said A/A becomes "A/G" -- the evidence of a dropout is gone. A locus the
+# consensus rule refused to call becomes missing -- all three observations are
+# gone. Neither loss is necessary: the likelihood already integrates over the
+# unknown true genotype, so it can just as easily condition on every
+# observation instead of one summary of them.
+#
+# For sample i at locus l with replicate observations o_1 ... o_R, define the
+# genotype likelihood
+#
+#     Lik_il(g) = prod_r  P(o_r | g)
+#
+# and then, exactly as before but with Lik in place of a single observation,
+#
+#     P(H1)_l = sum_g   P(g) Lik_il(g) Lik_jl(g)
+#     P(H0)_l = sum_g1 sum_g2  P(g1,g2) Lik_il(g1) Lik_jl(g2)
+#
+# A sample with no observation at a locus gets Lik = 1 everywhere, which makes
+# H1 and H0 collapse to the same marginal and contribute exactly zero evidence.
+# Missing data needs no special case; it simply says nothing.
+#
+# Note the error rates to use here are the PER-REPLICATE rates, not the much
+# smaller residual rates of a consensus call.
+
+#' Per-locus genotype likelihoods from a long table of replicate genotypes.
+#'
+#' @param rep_gt sample-replicate x locus genotype matrix (rows are individual
+#'   PCR replicates, so one sample contributes several rows).
+#' @param rep_sample the sample each row belongs to.
+#' @param samples the sample order to return, defaulting to first appearance.
+gid_geno_lik <- function(rep_gt, rep_sample, freqs, dropout, false_allele,
+                         samples = NULL, dict = NULL) {
+  loci <- colnames(rep_gt)
+  rep_sample <- as.character(rep_sample)
+  if (is.null(samples)) samples <- unique(rep_sample)
+  idx <- match(rep_sample, samples)
+  keep <- !is.na(idx)
+  rep_gt <- rep_gt[keep, , drop = FALSE]; idx <- idx[keep]
+  n <- length(samples)
+
+  d <- if (length(dropout) == 1) setNames(rep(dropout, length(loci)), loci) else dropout
+  f <- if (length(false_allele) == 1) setNames(rep(false_allele, length(loci)), loci) else false_allele
+  if (is.null(dict))
+    dict <- lapply(loci, function(L) sort(unique(rep_gt[, L][!is.na(rep_gt[, L])])))
+  names(dict) <- loci
+
+  lik <- vector("list", length(loci)); names(lik) <- loci
+  observed <- matrix(FALSE, n, length(loci), dimnames = list(samples, loci))
+
+  for (L in loci) {
+    dd <- dict[[L]]; G <- length(dd)
+    if (!G) { lik[[L]] <- matrix(1, n, 1); next }
+    E <- gid_obs_matrix(dd, freqs[[L]], d[[L]], f[[L]])   # E[obs, true]
+    m <- matrix(1, n, G, dimnames = list(samples, dd))
+    o <- match(rep_gt[, L], dd)
+    got <- !is.na(o)
+    if (any(got)) {
+      # multiply each sample's row by P(observation | g) for every replicate
+      for (r in which(got)) {
+        s <- idx[r]
+        m[s, ] <- m[s, ] * E[o[r], ]
+        observed[s, L] <- TRUE
+      }
+    }
+    lik[[L]] <- m
+  }
+  list(samples = samples, loci = loci, dict = dict, lik = lik,
+       observed = observed, n_reps = as.integer(table(factor(idx, levels = seq_len(n)))))
+}
+
+
+#' Turn a consensus genotype matrix into the same structure, so both routes
+#' share one code path. Each sample simply has a single "replicate".
+gid_geno_lik_from_gt <- function(gt, freqs, dropout, false_allele, dict = NULL) {
+  gid_geno_lik(gt, rownames(gt), freqs, dropout, false_allele,
+               samples = rownames(gt), dict = dict)
+}
+
+
+#' Pairwise log10 likelihood ratios from genotype likelihoods.
+#' Returns a list of n x n matrices, one per hypothesis, plus the count of loci
+#' both samples were observed at.
+gid_pair_loglik <- function(glik, freqs, hypotheses = c("same_individual", "full_sib")) {
+  n <- length(glik$samples)
+  out <- lapply(hypotheses, function(h) matrix(0, n, n))
+  names(out) <- hypotheses
+  n_cmp <- matrix(0L, n, n)
+
+  for (L in glik$loci) {
+    dd <- glik$dict[[L]]
+    if (!length(dd)) next
+    M  <- glik$lik[[L]]                      # n x G
+    gp <- gid_geno_prob(freqs[[L]], dd)
+    ob <- glik$observed[, L]
+    n_cmp <- n_cmp + outer(ob, ob, "&")
+
+    for (h in hypotheses) {
+      P <- if (h == "same_individual") diag(gp, nrow = length(gp))
+           else gid_pair_prob(freqs[[L]], dd, GID_KINSHIP[[h]])
+      out[[h]] <- out[[h]] + log10(pmax(M %*% P %*% t(M), 1e-300))
+    }
+  }
+  c(out, list(n_compared = n_cmp))
+}
+
+
 gid_method_lr <- function(gt, freqs = NULL, enc = NULL,
                           dropout = 0.02, false_allele = 0.005,
                           kinship = "full_sib", prior_same = NULL,
                           post_cut = 0.999, min_loci = 15,
-                          linkage = "single", weights = NULL) {
+                          linkage = "single", weights = NULL, reps = NULL) {
+
+  ## ---- replicate route: condition on every PCR observation ---------------
+  if (!is.null(reps)) {
+    if (is.null(freqs)) freqs <- gid_allele_freq(gt, weights)
+    kin <- if (is.character(kinship)) kinship else "full_sib"
+    keep <- reps$sample %in% rownames(gt)
+    rgt <- reps$gt[keep, colnames(gt), drop = FALSE]
+    rsm <- as.character(reps$sample[keep])
+    ## A sample with no replicate rows would otherwise contribute no evidence
+    ## at all and be split off as a singleton. Fall back to its consensus call
+    ## as a single observation, so a partially replicated dataset still works.
+    orphan <- setdiff(rownames(gt), unique(rsm))
+    if (length(orphan)) {
+      rgt <- rbind(rgt, gt[orphan, , drop = FALSE])
+      rsm <- c(rsm, orphan)
+    }
+    glik <- gid_geno_lik(rgt, rsm, freqs, dropout, false_allele,
+                         samples = rownames(gt),
+                         dict = gid_encode(gt)$dict)
+    pl <- gid_pair_loglik(glik, freqs, c("same_individual", kin))
+    return(gid_lr_finish(rownames(gt),
+                         pl[["same_individual"]] - pl[[kin]], pl$n_compared,
+                         prior_same, post_cut, min_loci, linkage,
+                         settings = list(dropout = mean(dropout),
+                                         false_allele = mean(false_allele),
+                                         kinship = kinship, post_cut = post_cut,
+                                         min_loci = min_loci, linkage = linkage,
+                                         input = "replicates",
+                                         reps_per_sample = mean(glik$n_reps),
+                                         n_from_consensus = length(orphan))))
+  }
+
   if (is.null(enc))   enc   <- gid_encode(gt)
   if (is.null(freqs)) freqs <- gid_allele_freq(gt, weights)
   k <- if (is.character(kinship)) GID_KINSHIP[[kinship]] else kinship
@@ -1155,6 +1329,53 @@ gid_method_lr <- function(gt, freqs = NULL, enc = NULL,
 }
 
 
+#' Shared tail of the likelihood-ratio methods: estimate the prior, convert
+#' evidence to posteriors, threshold, and resolve the match graph. Both the
+#' consensus route and the replicate route end here, so a change to the
+#' decision rule cannot apply to one and not the other.
+#'
+#' @param lrm n x n matrix of log10 likelihood ratios, or a vector over pairs.
+gid_lr_finish <- function(ids, lrm, n_cmpm, prior_same, post_cut, min_loci,
+                          linkage, settings = list(), extra = list()) {
+  n <- length(ids)
+  ij <- which(upper.tri(matrix(0, n, n)), arr.ind = TRUE)
+  i <- ij[, 1]; j <- ij[, 2]
+  lr    <- lrm[cbind(i, j)]
+  n_cmp <- n_cmpm[cbind(i, j)]
+
+  prior_iter <- NULL
+  if (is.null(prior_same)) {
+    pri <- 1 / max(n, 2); prior_iter <- pri
+    for (it in seq_len(25)) {
+      po <- pri / (1 - pri)
+      nm <- sum(n_cmp >= min_loci & 1 / (1 + 10^(-(log10(po) + lr))) >= post_cut)
+      new <- min(0.5, max(1 / max(n, 2), (nm + 1) / length(i)))
+      prior_iter <- c(prior_iter, new)
+      if (abs(new - pri) < 1e-10) break
+      pri <- new
+    }
+    prior_same <- pri
+  }
+  post <- 1 / (1 + 10^(-(log10(prior_same / (1 - prior_same)) + lr)))
+
+  pr <- data.frame(i = i, j = j, id1 = ids[i], id2 = ids[j],
+                   n_compared = n_cmp, log10_LR = lr, posterior_same = post,
+                   stringsAsFactors = FALSE)
+  m  <- pr[pr$n_compared >= min_loci & pr$posterior_same >= post_cut, , drop = FALSE]
+  rs <- gid_resolve(m, ids, linkage)
+
+  c(list(method = "lr", assignment = rs$assignment, conflicts = rs$conflicts,
+         n_conflict = rs$n_conflict, matched_pairs = m, pairs = pr,
+         max_log10_LR_observed =
+           if (nrow(pr)) max(pr$log10_LR[pr$n_compared >= min_loci], -Inf) else NA,
+         max_posterior_observed =
+           if (nrow(pr)) max(pr$posterior_same[pr$n_compared >= min_loci], 0) else NA,
+         prior_path = prior_iter,
+         settings = c(settings, list(prior_same = prior_same))),
+    extra)
+}
+
+
 #' Per-sample power: how identifiable is this sample given only the loci it
 #' actually has? This is the honest answer to "can I trust a singleton?"
 gid_sample_power <- function(gt, pid_tab) {
@@ -1201,9 +1422,51 @@ gid_method_sethi <- function(gt, freqs = NULL, enc = NULL,
                              relationships = c("unrelated", "full_sib",
                                                "parent_offspring"),
                              lambda_cut = 1, min_loci = 15,
-                             linkage = "single", weights = NULL) {
+                             linkage = "single", weights = NULL, reps = NULL) {
   if (is.null(enc))   enc   <- gid_encode(gt)
   if (is.null(freqs)) freqs <- gid_allele_freq(gt, weights)
+
+  ## ---- replicate route: condition on every PCR observation ---------------
+  if (!is.null(reps)) {
+    keep <- reps$sample %in% rownames(gt)
+    rgt <- reps$gt[keep, colnames(gt), drop = FALSE]
+    rsm <- as.character(reps$sample[keep])
+    orphan <- setdiff(rownames(gt), unique(rsm))
+    if (length(orphan)) { rgt <- rbind(rgt, gt[orphan, , drop = FALSE])
+                          rsm <- c(rsm, orphan) }
+    glik <- gid_geno_lik(rgt, rsm, freqs, dropout, false_allele,
+                         samples = rownames(gt), dict = enc$dict)
+    pl <- gid_pair_loglik(glik, freqs, c("same_individual", relationships))
+    n  <- length(rownames(gt))
+    alt <- array(unlist(pl[relationships]), dim = c(n, n, length(relationships)))
+    best_ll   <- apply(alt, 1:2, max)
+    best_name <- matrix(relationships[apply(alt, 1:2, which.max)], n, n)
+    lam <- pl[["same_individual"]] - best_ll
+
+    ij <- which(upper.tri(matrix(0, n, n)), arr.ind = TRUE)
+    i <- ij[, 1]; j <- ij[, 2]
+    pr <- data.frame(i = i, j = j, id1 = rownames(gt)[i], id2 = rownames(gt)[j],
+                     n_compared = pl$n_compared[cbind(i, j)],
+                     log10_lambda = lam[cbind(i, j)],
+                     best_alternative = best_name[cbind(i, j)],
+                     stringsAsFactors = FALSE)
+    m  <- pr[pr$n_compared >= min_loci & pr$log10_lambda > log10(lambda_cut), , drop = FALSE]
+    rs <- gid_resolve(m, rownames(gt), linkage)
+    return(list(method = "sethi", assignment = rs$assignment,
+                conflicts = rs$conflicts, n_conflict = rs$n_conflict,
+                matched_pairs = m, pairs = pr,
+                max_log10_lambda_observed =
+                  if (nrow(pr)) max(pr$log10_lambda[pr$n_compared >= min_loci], -Inf) else NA,
+                alt_used = table(m$best_alternative),
+                settings = list(dropout = mean(dropout),
+                                false_allele = mean(false_allele),
+                                relationships = relationships,
+                                lambda_cut = lambda_cut, min_loci = min_loci,
+                                linkage = linkage, input = "replicates",
+                                reps_per_sample = mean(glik$n_reps),
+                                n_from_consensus = length(orphan))))
+  }
+
   loci <- colnames(gt)
   d <- if (length(dropout) == 1) setNames(rep(dropout, length(loci)), loci) else dropout
   f <- if (length(false_allele) == 1) setNames(rep(false_allele, length(loci)), loci) else false_allele

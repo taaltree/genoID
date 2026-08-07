@@ -69,6 +69,50 @@ so you can score any method against it:
 Sethi et al. recovers the truth exactly. That gap — 47 animals versus 28 — is
 what a 3% dropout rate does to methods that only count differences.
 
+## PCR replicates
+
+If your file has several rows per sample — one per PCR replicate — the app
+detects it and offers to **use every replicate observation directly** instead of
+collapsing them to a consensus first. The two likelihood methods extend
+naturally: for sample *i* at locus *ℓ* with replicate observations
+*o*₁…*o*<sub>R</sub>, the genotype likelihood is
+
+```
+L_i(g) = prod_r P(o_r | g)
+```
+
+and it drops straight into the same two hypotheses. Missing observations
+contribute a factor of 1, which makes both hypotheses collapse to the same
+marginal — so missing data says nothing rather than needing a special rule.
+
+**Does it help?** Across 180 simulations with a known answer (20–40 loci, 3–25%
+dropout), the replicate route landed closer to the truth in 114 cases, the
+consensus route in 3, and they tied in 63. The gain appears where you are
+marginal:
+
+| Situation | What replicates buy |
+|---|---|
+| Plenty of loci, low dropout | Nothing measurable — both already recover the truth |
+| 30 loci, 25% dropout | Agreement with truth 0.73 → **0.97** |
+| Too few loci for the job | Not enough; replicates cannot manufacture information the panel never had |
+
+What improves unconditionally is the **margin** — the gap between the weakest
+true recapture and the strongest coincidental match. It roughly doubled in every
+condition tested. That does not change an answer that was already right, but it
+means the answer survives a worse choice of threshold.
+
+Reproduce the experiment with `Rscript compare_reps_vs_consensus.R`.
+
+> **Watch the error rates.** With replicates you supply *per-reaction* dropout
+> and false-allele rates (a few percent). With consensus genotypes you supply the
+> much smaller residual rates that survive the multi-tube rule (a few tenths of a
+> percent). Mixing them up is the easiest way to get this wrong, so the app says
+> which one it wants.
+
+Only the two likelihood methods can use replicates. Exact matching, the mismatch
+threshold, GenAlEx and allelematch compare one genotype per sample, so they keep
+running on a consensus and the comparison tab stays meaningful.
+
 ## Your data format
 
 One row per sample, one column per locus. Genotypes as two alleles in one cell
@@ -167,6 +211,7 @@ app/
   demo/                  simulated example dataset
 run_analysis.R           batch pipeline, writes result CSVs and figures
 make_demo_data.R         regenerates the example (and checks it is recoverable)
+compare_reps_vs_consensus.R  simulation experiment: replicates vs consensus
 report/                  written report (not committed; see .gitignore)
 ```
 

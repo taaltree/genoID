@@ -265,6 +265,24 @@ ui <- page_navbar(
     hint("Blocking stops samples from different species or populations ",
          "from ever being called the same animal, and keeps allele frequencies separate."),
 
+    conditionalPanel(
+      "output.has_reps == true",
+      tags$div(class = "gid-flag gid-ok", style = "font-size:.8rem",
+        tags$b("This file has several rows per sample."), " They look like PCR ",
+        "replicates. Using them directly is better than collapsing them to a ",
+        "consensus first \u2014 see Methods."),
+      selectInput("rep_col", "Replicate label column", choices = NULL),
+      selectizeInput("rep_drop", "Row labels to exclude", choices = NULL,
+                     multiple = TRUE,
+                     options = list(placeholder = "e.g. consensus")),
+      hint("Exclude any summary rows, such as a pre-computed consensus. ",
+           "Everything left is treated as one PCR replicate."),
+      radioButtons("rep_mode", "Genotypes to analyse",
+                   c("Use every replicate observation (recommended)" = "reps",
+                     "Collapse to a consensus first" = "consensus"),
+                   selected = "reps"),
+      uiOutput("rep_note")),
+
     selectizeInput("use_loci", "Loci to use", choices = NULL, multiple = TRUE,
                    options = list(plugins = list("remove_button"), placeholder = "detected automatically")),
     uiOutput("locus_note"),
@@ -587,6 +605,46 @@ server <- function(input, output, session) {
     raw(gid_read(input$file$datapath, sheet = input$sheet))
   })
 
+  ## A file with repeated sample IDs is either duplicated samples or PCR
+  ## replicates. Offer the replicate route when it looks like the latter.
+  has_reps <- reactive({
+    df <- raw(); if (is.null(df) || is.null(input$id_col)) return(FALSE)
+    anyDuplicated(as.character(df[[input$id_col]])) > 0
+  })
+  output$has_reps <- reactive(isTRUE(has_reps()))
+  outputOptions(output, "has_reps", suspendWhenHidden = FALSE)
+
+  observeEvent(list(raw(), input$id_col), {
+    df <- raw(); req(df, input$id_col)
+    if (!has_reps()) return()
+    nonloci <- setdiff(names(df), gid_detect_loci(df, sep = gid_guess_sep(df)))
+    guess <- grep("^(rep|replicate|pcr|run)", nonloci, ignore.case = TRUE, value = TRUE)
+    sel <- if (length(guess)) guess[1] else nonloci[1]
+    updateSelectInput(session, "rep_col", choices = nonloci, selected = sel)
+  })
+
+  observeEvent(input$rep_col, {
+    df <- raw(); req(df, nzchar(input$rep_col %||% ""))
+    v <- sort(unique(as.character(df[[input$rep_col]])))
+    ## anything that looks like a summary row, not a reaction
+    auto <- v[grepl("consensus|final|combined|summary", v, ignore.case = TRUE)]
+    updateSelectizeInput(session, "rep_drop", choices = v, selected = auto)
+  })
+
+  output$rep_note <- renderUI({
+    if (!isTRUE(has_reps())) return(NULL)
+    if (identical(input$rep_mode, "reps"))
+      tags$p(class = "gid-hint",
+        tags$b("The dropout and false-allele rates below now mean per-reaction "),
+        tags$b("rates"), ", not the residual rates of a consensus call. They are ",
+        "typically ten to a hundred times larger \u2014 a few percent rather than ",
+        "a few tenths of a percent.")
+    else
+      tags$p(class = "gid-hint",
+        "Replicates are collapsed with the multi-tube rule: a heterozygote ",
+        "accepted on two replicates, a homozygote only on three.")
+  })
+
   detected <- reactive({
     df <- raw(); req(df)
     gid_detect_loci(df, exclude = input$id_col, sep = gid_guess_sep(df, exclude = input$id_col))
@@ -626,11 +684,43 @@ server <- function(input, output, session) {
   prep <- reactive({
     df <- raw(); req(df, input$id_col, length(loci()) > 0)
     ids <- as.character(df[[input$id_col]])
+    sep <- gid_guess_sep(df, exclude = input$id_col)
+    use_reps <- isTRUE(has_reps()) && identical(input$rep_mode, "reps") &&
+                nzchar(input$rep_col %||% "")
+
+    ## ---- replicate route: several rows per sample, one genotype per sample
+    if (isTRUE(has_reps()) && nzchar(input$rep_col %||% "")) {
+      lab  <- as.character(df[[input$rep_col]])
+      keep <- !lab %in% (input$rep_drop %||% character(0))
+      validate(need(sum(keep) > 0,
+        "Every row was excluded. Clear some entries from 'Row labels to exclude'."))
+      rgt  <- gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(), sep = sep)
+      rsm  <- ids[keep]
+      gt   <- gid_consensus_from_reps(rgt, rsm)
+      reps <- if (use_reps) list(gt = rgt, sample = rsm) else NULL
+      grp  <- if (nzchar(input$group_col %||% ""))
+        as.character(df[[input$group_col]])[keep][match(rownames(gt), rsm)]
+        else rep("all", nrow(gt))
+      names(grp) <- rownames(gt)
+      grp[is.na(grp) | !nzchar(grp)] <- "unassigned"
+      f <- gid_filter(gt,
+             min_locus_call  = if (is.na(input$min_locus_call))  0 else input$min_locus_call,
+             min_sample_call = if (is.na(input$min_sample_call)) 0 else input$min_sample_call)
+      validate(need(nrow(f$gt) >= 2,
+        "Fewer than two samples survive the call-rate filters. Lower them in the sidebar."),
+        need(ncol(f$gt) >= 1, "No loci survive the call-rate filter."))
+      if (!is.null(reps))
+        reps$gt <- reps$gt[, colnames(f$gt), drop = FALSE]
+      return(list(gt = f$gt, grp = grp[rownames(f$gt)], raw_gt = gt, reps = reps,
+                  dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples,
+                  df = df, n_reps = length(rsm) / nrow(gt)))
+    }
+
     if (anyDuplicated(ids))
       ids <- ave(ids, ids, FUN = function(z)
         if (length(z) == 1) z else paste0(z, "#", seq_along(z)))
     df$.gid_key <- ids
-    gt <- gid_matrix(df, ".gid_key", loci(), sep = gid_guess_sep(df, exclude = input$id_col))
+    gt <- gid_matrix(df, ".gid_key", loci(), sep = sep)
     grp <- if (nzchar(input$group_col %||% "")) as.character(df[[input$group_col]]) else rep("all", nrow(df))
     names(grp) <- ids
     grp[is.na(grp) | !nzchar(grp)] <- "unassigned"
@@ -642,7 +732,7 @@ server <- function(input, output, session) {
                   "Fewer than two samples survive the call-rate filters. Lower them in the sidebar."),
              need(ncol(f$gt) >= 1,
                   "No loci survive the call-rate filter. Lower it in the sidebar."))
-    list(gt = f$gt, grp = grp[rownames(f$gt)], raw_gt = gt,
+    list(gt = f$gt, grp = grp[rownames(f$gt)], raw_gt = gt, reps = NULL,
          dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples, df = df)
   })
 
@@ -749,7 +839,7 @@ server <- function(input, output, session) {
       lr <- gid_by_group(p$gt, p$grp, gid_method_lr, dropout = input$dropout,
                          false_allele = input$false_allele, kinship = input$kinship,
                          post_cut = input$post_cut, min_loci = input$min_loci,
-                         linkage = input$linkage, prior_same = pr)
+                         linkage = input$linkage, prior_same = pr, reps = p$reps)
       incProgress(0.3, detail = "exact match")
       ex <- gid_by_group(p$gt, p$grp, gid_method_exact,
                          min_loci = input$min_loci, linkage = input$linkage)
@@ -764,7 +854,8 @@ server <- function(input, output, session) {
                                   dropout = input$dropout, false_allele = input$false_allele,
                                   relationships = input$sethi_rel,
                                   lambda_cut = input$lambda_cut,
-                                  min_loci = input$min_loci, linkage = input$linkage)
+                                  min_loci = input$min_loci, linkage = input$linkage,
+                                  reps = p$reps)
       }
       if (isTRUE(input$run_genalex)) {
         incProgress(0.1, detail = "GenAlEx Matches")
