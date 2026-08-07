@@ -22,7 +22,7 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
 | **Method comparison** | All six methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
-| **Methods** | Plain-language description of every method followed by the actual statistical model and equations |
+| **Methods** | Notation, a worked example carried through all six methods, the statistical model behind each one, and a glossary defining every column the app can show you |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
@@ -127,6 +127,13 @@ gid_propagate_error(d, f, rule = "taberlet")   # residual rate after a multi-tub
 Do **not** estimate the false-allele rate by scoring replicates against a
 consensus that required unanimous replicates to call a homozygote — that forces
 the estimate to exactly zero. The Methods page in the app explains why.
+
+## Jargon
+
+Tables show plain-English headings, not the raw column names. Hover any heading
+for a definition. The full list — label, the column name it carries in
+downloaded files, and what it means — is on the Methods tab under **Glossary of
+every column**.
 
 ## How the app is laid out
 

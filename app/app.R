@@ -19,6 +19,8 @@ core <- c("genoID_core.R", "app/genoID_core.R", "../app/genoID_core.R")
 source(core[file.exists(core)][1])
 mp <- c("methods_page.R", "app/methods_page.R", "../app/methods_page.R")
 source(mp[file.exists(mp)][1])
+gl <- c("glossary.R", "app/glossary.R", "../app/glossary.R")
+source(gl[file.exists(gl)][1])
 
 options(shiny.maxRequestSize = 60 * 1024^2)
 
@@ -92,19 +94,36 @@ GID_METHODS <- list(
 GID_METHOD_CHOICES <- setNames(names(GID_METHODS),
                                vapply(GID_METHODS, `[[`, "", "label"))
 
-vbox <- function(title, id, ico, theme = "light")
-  value_box(title, textOutput(id, inline = TRUE), showcase = icon(ico),
-            theme = theme, showcase_layout = showcase_left_center(width = "58px"),
-            height = "104px")
+## value_box()'s first formal is `title`, so the tooltip cannot be passed as a
+## `title` attribute -- it would bind to the formal and displace the label.
+## Wrap the box instead and put the tooltip on the wrapper.
+vbox <- function(label, id, ico, theme = "light", key = NULL) {
+  tip <- if (!is.null(key) && !is.null(GID_GLOSSARY[[key]])) GID_GLOSSARY[[key]][[2]]
+  box <- value_box(label, textOutput(id, inline = TRUE), showcase = icon(ico),
+                   theme = theme, showcase_layout = showcase_left_center(width = "58px"),
+                   height = "104px")
+  if (is.null(tip)) box
+  else tags$div(class = "gid-tip", title = tip,
+                style = "height:100%", box)
+}
 
-dt <- function(x, ...) {
-  num <- which(vapply(x, is.numeric, TRUE)) - 1L
+## Tables show plain-English headers; the raw column name and its definition
+## are on the header tooltip, so nothing is hidden from anyone who needs it.
+dt <- function(x, ..., relabel = TRUE) {
+  if (relabel) x <- gid_relabel(x)
+  tips <- attr(x, "gid_tips")
+  num  <- which(vapply(x, is.numeric, TRUE)) - 1L
+  hdr  <- if (!is.null(tips) && any(nzchar(tips)))
+    JS(sprintf("function(thead){var t=%s;$(thead).find('th').each(function(i){
+         if(t[i]){$(this).attr('title',t[i]).addClass('gid-th-tip');}});}",
+       jsonlite::toJSON(tips))) else NULL
   datatable(
     x, rownames = FALSE, extensions = "Buttons",
     options = c(list(pageLength = 12, scrollX = TRUE, dom = "Bfrtip",
                      buttons = list(list(extend = "csv", text = "Download CSV"))),
                 if (length(num)) list(columnDefs = list(
-                  list(className = "dt-body-right", targets = num)))),
+                  list(className = "dt-body-right", targets = num))),
+                if (!is.null(hdr)) list(headerCallback = hdr)),
     ...)
 }
 
@@ -214,6 +233,9 @@ ui <- page_navbar(
     .gid-empty h4{color:%s;font-weight:600;font-size:1.05rem;margin-bottom:.4rem}
     .gid-empty p{font-size:.88rem;max-width:34rem;margin:0 auto .35rem}
     .dataTables_wrapper{font-size:.86rem}
+    th.gid-th-tip{cursor:help;border-bottom:1px dotted %s!important}
+    th.gid-th-tip:hover{color:%s!important}
+    .gid-tip{cursor:help}
     .gid-mhead{background:#fff;border:1px solid #e3e9ef;border-left:3px solid %s;
       border-radius:0 4px 4px 0;padding:.9rem 1.1rem;margin-bottom:1rem;
       box-shadow:0 1px 3px rgba(29,53,87,.06)}
@@ -225,7 +247,8 @@ ui <- page_navbar(
     .gid-mtag.chk{background:#e3efef;color:#0f6b73}
     .gid-mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
       gap:.2rem 1.6rem;margin-top:.5rem}
-  ", MUTED, MUTED, SOFT, INK, INK, INK, INK, ACCENT, MUTED, INK, ACCENT, INK)))),
+  ", MUTED, MUTED, SOFT, INK, INK, INK, INK, ACCENT, MUTED, INK, ACCENT, INK,
+     MUTED, INK)))),
 
   sidebar = sidebar(
     width = 330, class = "bg-white",
@@ -350,10 +373,10 @@ ui <- page_navbar(
     conditionalPanel("output.has_data == true",
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
-      vbox("Samples", "vb_samples", "vial", "primary"),
-      vbox("Loci used", "vb_loci", "dna", "secondary"),
-      vbox("Median call rate", "vb_call", "percent", "light"),
-      vbox("Groups", "vb_groups", "layer-group", "light")
+      vbox("Samples", "vb_samples", "vial", "primary", key = "n_samples"),
+      vbox("Loci used", "vb_loci", "dna", "secondary", key = "n_loci"),
+      vbox("Median call rate", "vb_call", "percent", "light", key = "call_rate"),
+      vbox("Groups", "vb_groups", "layer-group", "light", key = "group")
     ),
     layout_columns(
       col_widths = c(12),
@@ -395,10 +418,10 @@ ui <- page_navbar(
     uiOutput("power_warning"),
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
-      vbox("Individuals", "vb_ind", "paw", "primary"),
-      vbox("Sampled once", "vb_single", "circle-dot", "light"),
-      vbox("Recapture rate", "vb_recap", "repeat", "light"),
-      vbox("Largest cluster", "vb_max", "maximize", "light")
+      vbox("Individuals", "vb_ind", "paw", "primary", key = "n_individuals"),
+      vbox("Sampled once", "vb_single", "circle-dot", "light", key = "n_singletons"),
+      vbox("Recapture rate", "vb_recap", "repeat", "light", key = "recapture_rate"),
+      vbox("Largest cluster", "vb_max", "maximize", "light", key = "max_cluster")
     ),
     layout_columns(
       col_widths = c(6, 6),
@@ -924,8 +947,8 @@ server <- function(input, output, session) {
     a$group <- r$grp[a$sample]
     a$call_rate <- round(rowMeans(!is.na(r$gt))[a$sample], 3)
     pw <- power(); a$pid_sib <- signif(pw$pid_sib[match(a$sample, pw$sample)], 3)
-    a$n_samples <- as.integer(table(a$individual)[a$individual])
-    a[order(-a$n_samples, a$individual, -a$call_rate), ]
+    a$n_samples_for_individual <- as.integer(table(a$individual)[a$individual])
+    a[order(-a$n_samples_for_individual, a$individual, -a$call_rate), ]
   })
 
   output$tbl_final <- renderDT(dt(final_tbl()))
@@ -941,6 +964,7 @@ server <- function(input, output, session) {
     dt(transform(x, recapture_rate = round(recapture_rate, 3))) })
   output$tbl_ari  <- renderDT({ m <- round(res()$cmp$ari, 3)
     dt(data.frame(method = rownames(m), m, check.names = FALSE)) })
+
   output$tbl_disagree <- renderDT({ x <- res()$cmp$table
     x <- x[x$disputed, setdiff(names(x), "disputed"), drop = FALSE]
     if (!nrow(x)) return(dt(data.frame(message = "All methods agree on every sample.")))

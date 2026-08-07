@@ -126,6 +126,7 @@ methods_panel <- function() {
         tags$a(href = "#m-graph", "From pairs to individuals"),
         tags$a(href = "#m-err", "Measuring error rates"),
         tags$a(href = "#m-set", "Choosing settings"),
+        tags$a(href = "#m-glossary", "Glossary of every column"),
         tags$a(href = "#m-refs", "References")),
 
       card(card_header("Methods & mathematics"), tags$div(class = "m-body",
@@ -611,6 +612,13 @@ methods_panel <- function() {
            "whole analysis across a grid of these settings. If the individual count barely ",
            "moves, it is a property of your data; if it swings, it is a property of your ",
            "choices, and the range belongs in your results."),
+
+        # ------------------------------------------------------------ glossary
+        .h("Glossary of every column", id = "m-glossary"),
+        .p("Every quantity the app can show you, what it means, and the column name ",
+           "it carries in downloaded files. Tables in the app show the plain-English ",
+           "label; hover any column header to see its definition without coming back here."),
+        gid_glossary_ui(),
 
         # ---------------------------------------------------------------- refs
         .h("References", id = "m-refs"),
