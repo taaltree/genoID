@@ -220,16 +220,41 @@ res <- gid_by_group(gt, raw$Species, gid_method_lr,
 write.csv(res$assignment, "individuals.csv", row.names = FALSE)
 ```
 
-If you have replicate genotypes, measure your error rates instead of guessing:
-
 ```r
-gid_error_ml(rep_gt, sample_ids)        # dropout + false allele, by maximum likelihood
-gid_propagate_error(d, f, rule = "taberlet")   # residual rate after a multi-tube consensus
+gid_estimate_error(gt, reps)            # picks the best method your data supports
+gid_error_ml(rep_gt, sample_ids)        # dropout + false allele by maximum likelihood
+gid_error_from_fis(gt)                  # rough dropout from a heterozygote deficit
+gid_propagate_error(d, f, rule = "taberlet")   # per-reaction -> consensus residual
 ```
 
-Do **not** estimate the false-allele rate by scoring replicates against a
-consensus that required unanimous replicates to call a homozygote — that forces
-the estimate to exactly zero. The Methods page in the app explains why.
+## Where do the error rates come from?
+
+Guessing the dropout and false-allele rates is the weakest link in the analysis,
+and you usually don't have to. Press **Estimate these from my data** in the
+sidebar; the app picks the best method your data supports.
+
+| What you have | Method | On the AITRC panel |
+|---|---|---|
+| **PCR replicates** | Maximum likelihood over the replicates, integrating over the unknown true genotype. No consensus involved, so nothing is circular. Returns confidence intervals. | dropout **2.9%** [2.5–3.4], false allele **1.5%** [1.3–1.7] per reaction |
+| **No replicates** | Heterozygote deficit: dropout turns hets into homs, so *d* ≈ 1 − H<sub>o</sub>/H<sub>e</sub> = F<sub>IS</sub> | ≈ 6.0% — right order of magnitude, not a number to report |
+| **Nothing** | Literature values, then check with the sensitivity panel | answer moves by 1 animal across a 100× change |
+
+Two replicates on a *subset* of samples is enough — you don't have to replicate
+everything, and the app uses whatever replicates exist even when you're
+analysing consensus calls.
+
+> **The rate depends on what you're analysing.** Raw replicates want the
+> per-reaction rate (a few percent). Consensus calls want the much smaller
+> residual rate that survives the multi-tube rule (a few tenths of a percent) —
+> a factor of ~300 apart on this panel. The app measures the per-reaction rate
+> and converts automatically when you're on consensus calls.
+
+**A trap worth knowing.** The standard Broquet & Petit estimator scores each
+replicate against a consensus. If your consensus calls a homozygote only when
+all replicates agree, no replicate can ever be seen disagreeing with a
+homozygous consensus, and the false-allele rate is forced to **exactly zero**.
+On this dataset that estimator returns 0.00% where maximum likelihood, given the
+same replicates, returns 1.5%.
 
 ## Jargon
 

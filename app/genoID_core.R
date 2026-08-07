@@ -399,6 +399,79 @@ gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
 }
 
 
+#' Dropout rate from a heterozygote deficit, for people with no replicates.
+#'
+#' Dropout turns heterozygotes into homozygotes, so it shows up as fewer
+#' heterozygotes than random mating predicts. If Ho is the observed
+#' heterozygosity and He the expected, then under dropout alone
+#'
+#'     Ho ~ He (1 - d)   =>   d ~ 1 - Ho/He   =   Fis
+#'
+#' This is a rough estimate, not a measurement, and not a guaranteed ceiling.
+#' Inbreeding, population structure (the Wahlund effect) and null alleles all
+#' depress heterozygosity too, so it usually errs high -- on the AITRC panel it
+#' returns 6.0% against a measured 2.9%. But false alleles push the other way by
+#' manufacturing heterozygotes, and on a simulated panel with 3.0% dropout it
+#' returned 2.6%. Use it to know the rough scale, and prefer replicates.
+#'
+#' Must be given one sample per individual: recaptures inflate whatever
+#' genotype they carry and distort both Ho and He.
+gid_error_from_fis <- function(gt) {
+  ls_ <- gid_locus_stats(gt)
+  ls_$dropout_est <- pmax(0, 1 - ls_$Ho / ls_$He)
+  ok <- is.finite(ls_$dropout_est) & ls_$n_alleles >= 2 & ls_$He > 0.05
+  ho <- sum(ls_$Ho[ok] * ls_$n[ok]); he <- sum(ls_$He[ok] * ls_$n[ok])
+  list(dropout = if (he > 0) max(0, 1 - ho / he) else NA_real_,
+       false_allele = NA_real_,
+       per_locus = ls_[, c("locus", "n", "Ho", "He", "Fis", "dropout_est")],
+       n_loci_used = sum(ok))
+}
+
+
+#' One entry point for "what are my error rates?", picking the best method the
+#' data can support and saying which it used.
+#'
+#' @param gt   consensus genotype matrix, one row per sample.
+#' @param reps optional list(gt = replicate genotype matrix, sample = ids).
+gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2) {
+
+  ## Fis and allele frequencies both need one sample per individual. Use exact
+  ## matching to deduplicate, which needs no error model and so cannot be
+  ## circular with what we are about to estimate.
+  dedup <- function(m) {
+    if (nrow(m) < 3) return(m)
+    a <- gid_method_exact(m, min_loci = max(5, floor(ncol(m) * 0.4)))$assignment
+    m[a$sample[!duplicated(a$individual)], , drop = FALSE]
+  }
+  gt_u <- dedup(gt)
+  if (is.null(freqs)) freqs <- gid_allele_freq(gt_u)
+
+  if (!is.null(reps)) {
+    n_per <- table(reps$sample)
+    if (sum(n_per >= min_reps) >= 5) {
+      ml <- try(gid_error_ml(reps$gt, reps$sample, freqs = freqs, min_reps = min_reps),
+                silent = TRUE)
+      if (!inherits(ml, "try-error"))
+        return(list(method = "replicates",
+                    dropout = unname(ml[["dropout"]]),
+                    false_allele = unname(ml[["false_allele"]]),
+                    dropout_ci = unname(c(ml[["dropout_lo"]], ml[["dropout_hi"]])),
+                    false_ci = unname(c(ml[["false_lo"]], ml[["false_hi"]])),
+                    scale = "per replicate",
+                    n_samples = sum(n_per >= min_reps),
+                    detail = ml))
+    }
+  }
+
+  f <- gid_error_from_fis(gt_u)
+  list(method = "heterozygote deficit",
+       dropout = f$dropout, false_allele = NA_real_,
+       dropout_ci = c(NA_real_, NA_real_), false_ci = c(NA_real_, NA_real_),
+       scale = "per genotype, approximate",
+       n_samples = nrow(gt_u), detail = f)
+}
+
+
 #' Propagate per-replicate error into the residual error of a consensus rule.
 #'
 #' The consensus genotypes the lab actually analyses have already survived a

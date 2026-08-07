@@ -365,8 +365,13 @@ ui <- page_navbar(
       "input.method == 'probabilistic' || input.method == 'sethi'",
       sliderInput("dropout", "Allelic dropout rate", 0, 0.20, 0.005, step = 0.001),
       sliderInput("false_allele", "False allele rate", 0, 0.10, 0.002, step = 0.001),
-      hint("Rates of the genotypes you are uploading. Multi-replicate consensus ",
-           "calls are usually well under 0.005.")),
+      actionButton("est_error", "Estimate these from my data",
+                   icon = icon("wand-magic-sparkles"),
+                   class = "btn-sm btn-outline-primary w-100"),
+      uiOutput("est_error_note"),
+      hint("Guessing these is the weakest part of the analysis. If you uploaded ",
+           "replicates the app can measure them; if not it can put an upper bound ",
+           "on dropout. See ", tags$b("Measuring error rates"), " on the Methods tab.")),
 
     accordion(
       open = FALSE,
@@ -674,6 +679,89 @@ server <- function(input, output, session) {
     ## anything that looks like a summary row, not a reaction
     auto <- v[grepl("consensus|final|combined|summary", v, ignore.case = TRUE)]
     updateSelectizeInput(session, "rep_drop", choices = v, selected = auto)
+  })
+
+  ## Replicates the file contains, independent of whether the user chose to
+  ## analyse with them. Error rates can always be measured from replicates that
+  ## exist, even if the analysis is running on consensus calls.
+  reps_available <- reactive({
+    df <- raw()
+    if (is.null(df) || !isTRUE(has_reps()) || !nzchar(input$rep_col %||% "")) return(NULL)
+    if (!length(loci())) return(NULL)
+    lab  <- as.character(df[[input$rep_col]])
+    keep <- !lab %in% (input$rep_drop %||% character(0))
+    if (!any(keep)) return(NULL)
+    list(gt = gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(),
+                         sep = gid_guess_sep(df, exclude = input$id_col)),
+         sample = as.character(df[[input$id_col]])[keep])
+  })
+
+  ## ---- estimating the error rates from the data itself --------------------
+  err_est <- reactiveVal(NULL)
+  observeEvent(input$est_error, {
+    p <- try(prep(), silent = TRUE)
+    if (inherits(p, "try-error") || is.null(p))
+      return(showNotification("Load a file and choose your loci first.", type = "warning"))
+    rp <- reps_available()
+    e <- try(withProgress(message = "Measuring genotyping error", value = 0.4,
+                          gid_estimate_error(p$gt, rp)), silent = TRUE)
+    if (inherits(e, "try-error"))
+      return(showNotification(paste("Could not estimate:", conditionMessage(attr(e, "condition"))),
+                              type = "error"))
+    err_est(e)
+    ## Replicate rates apply to a single reaction. If the analysis is running on
+    ## consensus calls, the model wants the much smaller rate that survives the
+    ## consensus rule, so convert before filling the sliders in.
+    d <- e$dropout; f <- e$false_allele
+    converted <- FALSE
+    if (identical(e$method, "replicates") && is.null(p$reps)) {
+      n_per <- mean(table(rp$sample))
+      pr <- gid_propagate_error(d, f, n_rep = max(2L, round(n_per)),
+                                rule = "taberlet", hom_n = 3, het_n = 2,
+                                per_rep_missing = mean(is.na(rp$gt)),
+                                nsim = 20000)
+      d <- max(pr[["dropout"]], 1e-4); f <- max(pr[["false_allele"]], 1e-4)
+      converted <- TRUE
+    }
+    err_est(c(e, list(applied_dropout = d, applied_false = f, converted = converted)))
+    if (is.na(f)) f <- max(0.001, round(d / 3, 3))
+    updateSliderInput(session, "dropout", value = round(d, 3))
+    updateSliderInput(session, "false_allele", value = round(f, 3))
+  })
+
+  output$est_error_note <- renderUI({
+    e <- err_est(); if (is.null(e)) return(NULL)
+    if (identical(e$method, "replicates"))
+      tags$div(class = "gid-flag gid-ok", style = "font-size:.78rem;margin:.5rem 0",
+        tags$b("Measured from your replicates."), " Maximum likelihood over ",
+        e$n_samples, " samples, integrating over the unknown true genotype so no ",
+        "consensus is involved.",
+        tags$div(style = "margin-top:.3rem;font-family:var(--bs-font-monospace)",
+          sprintf("dropout %.3f [%.3f-%.3f]   false allele %.3f [%.3f-%.3f]",
+                  e$dropout, e$dropout_ci[1], e$dropout_ci[2],
+                  e$false_allele, e$false_ci[1], e$false_ci[2])),
+        tags$div(style = "margin-top:.3rem",
+          if (isTRUE(e$converted)) tagList(
+            "You are analysing consensus calls, so the sliders were set to the ",
+            "much smaller residual rate that survives the multi-tube rule: ",
+            tags$code(sprintf("dropout %.4f, false allele %.4f",
+                              e$applied_dropout, e$applied_false)), ".")
+          else "These are per-reaction rates, which is what the replicate route wants."))
+    else
+      tags$div(class = "gid-flag", style = "font-size:.78rem;margin:.5rem 0",
+        tags$b("No replicates, so this is a rough estimate only."), " Dropout ",
+        "turns heterozygotes into homozygotes, so it shows up as a heterozygote ",
+        "deficit: ", tags$code(sprintf("d ~ %.3f", e$dropout)), " across ",
+        e$n_samples, " unique individuals.",
+        tags$div(style = "margin-top:.3rem",
+          "Treat this as the right order of magnitude, not a number to report. ",
+          "Inbreeding and population structure push it up; false alleles push it ",
+          "down by manufacturing heterozygotes, so it is not a ceiling either. ",
+          "The false-allele rate cannot be got this way at all and has been set ",
+          "to a third of the dropout estimate."),
+        tags$div(style = "margin-top:.3rem",
+          tags$b("To measure it properly, genotype some samples twice"), " and ",
+          "upload the replicates. Two reactions on a subset is enough."))
   })
 
   output$rep_note <- renderUI({
