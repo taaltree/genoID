@@ -3,8 +3,14 @@
 ## Upload a genotype table, get unique individuals. Species-agnostic: works for
 ## any diploid panel (SNPs or microsatellites), any number of loci.
 ##
-## Run locally:   shiny::runApp("app")
-## Deploy:        rsconnect::deployApp("app")  (bundle R/genoID_core.R with it)
+## Run locally:  shiny::runApp("app")
+## Deployed to GitHub Pages as a WebAssembly build -- see
+## .github/workflows/deploy.yml. Everything runs in the visitor's browser.
+##
+## Note: shinylive scans this source for package references, comments included.
+## Never name a package the app does not actually use in double-colon form,
+## even inside a comment -- every visitor's browser would download it on
+## startup.
 ## ---------------------------------------------------------------------------
 
 library(shiny); library(bslib); library(DT); library(ggplot2)
