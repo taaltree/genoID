@@ -370,8 +370,9 @@ ui <- page_navbar(
                    class = "btn-sm btn-outline-primary w-100"),
       uiOutput("est_error_note"),
       hint("Guessing these is the weakest part of the analysis. If you uploaded ",
-           "replicates the app can measure them; if not it can put an upper bound ",
-           "on dropout. See ", tags$b("Measuring error rates"), " on the Methods tab.")),
+           "replicates the app can measure them properly; if not it can at least ",
+           "get the order of magnitude. See ", tags$b("Measuring your own error rates"),
+           " on the Methods tab.")),
 
     accordion(
       open = FALSE,
