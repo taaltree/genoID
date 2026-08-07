@@ -457,9 +457,11 @@ ui <- page_navbar(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
       vbox("Individuals", "vb_ind", "paw", "primary", key = "n_individuals"),
       vbox("Sampled once", "vb_single", "circle-dot", "light", key = "n_singletons"),
-      vbox("Recapture rate", "vb_recap", "repeat", "light", key = "recapture_rate"),
+      vbox("Samples per animal", "vb_persample", "layer-group", "light",
+           key = "median_samples"),
       vbox("Largest cluster", "vb_max", "maximize", "light", key = "max_cluster")
     ),
+    uiOutput("recap_detail"),
     layout_columns(
       col_widths = c(6, 6),
       card(card_header(textOutput("evid_title", inline = TRUE)),
@@ -470,6 +472,16 @@ ui <- page_navbar(
                 "are the ones worth looking at by hand."))
     ),
     card(card_header("Individual assignments"), DTOutput("tbl_final")),
+    conditionalPanel("input.method == 'probabilistic'",
+      card(card_header("Choosing your posterior cutoff"),
+        hint("The cutoff is the one setting with no data behind it \u2014 unless ",
+             "you use the fact that the method already gives every pair a ",
+             "probability. Adding those up says how many mistakes each cutoff ",
+             "costs, in both directions, so the choice becomes a stated trade ",
+             "instead of a convention."),
+        uiOutput("calib_verdict"),
+        plotOutput("plot_calib", height = 320),
+        DTOutput("tbl_calib"))),
     card(card_header("Clusters that are not internally consistent"),
          hint("Every sample in a cluster should match every other sample in it. ",
               "Where that fails, the cluster is being held together by a chain and ",
@@ -1053,6 +1065,27 @@ server <- function(input, output, session) {
   output$vb_single <- renderText({ sum(table(best()$assignment$individual) == 1) })
   output$vb_recap <- renderText({
     s <- gid_summarise_assignment(best()$assignment); sprintf("%.0f%%", 100 * s$recapture_rate) })
+  output$vb_persample <- renderText({
+    s <- gid_summarise_assignment(best()$assignment)
+    sprintf("%.0f / %.1f", s$median_samples, s$mean_samples) })
+
+  output$recap_detail <- renderUI({
+    a <- best()$assignment; req(a)
+    s <- gid_summarise_assignment(a)
+    n <- as.integer(table(a$individual))
+    tags$p(class = "gid-hint", style = "margin:-.4rem 0 1rem",
+      tags$b("Samples per animal: "),
+      sprintf("median %g, mean %.2f, range %d to %d. ",
+              s$median_samples, s$mean_samples, min(n), max(n)),
+      tags$b("Recaptures per animal "), "(samples after the first): ",
+      sprintf("median %g, mean %.2f. ", s$median_recaptures, s$mean_recaptures),
+      sprintf("Overall recapture rate %.0f%% \u2014 that share of your samples were repeats of an animal already seen. ",
+              100 * s$recapture_rate),
+      if (s$mean_samples > 1.5 * max(s$median_samples, 1))
+        tags$span(style = "color:#c1502e",
+          sprintf("The mean is well above the median, so a few animals dominate: the top animal alone accounts for %d of %d samples.",
+                  max(n), s$n_samples)))
+  })
   output$vb_max <- renderText({ max(table(best()$assignment$individual)) })
 
   run_status <- function() {
@@ -1252,6 +1285,96 @@ server <- function(input, output, session) {
         if (length(tb) == 1) sprintf(
           " Every matched pair was hardest to distinguish from %s, so that is the alternative worth reporting.",
           gsub("_", " ", names(tb)[1])) else ""))
+  })
+
+  ## ---- posterior cutoff calibration ---------------------------------------
+  calib <- reactive({
+    r <- res(); req(r)
+    b <- r$methods$probabilistic; req(b)
+    do.call(rbind, lapply(names(b$by_group), function(g) {
+      e <- b$by_group[[g]]
+      if (is.null(e$pairs) || is.null(e$pairs$posterior_same)) return(NULL)
+      ids <- e$assignment$sample
+      tb <- gid_calibrate_threshold(e$pairs, ids, min_loci = input$min_loci,
+                                    linkage = input$linkage)
+      if (is.null(tb)) return(NULL)
+      cbind(group = g, tb, max_post = attr(tb, "max_posterior"),
+            n_ids = length(ids))
+    }))
+  })
+
+  output$calib_verdict <- renderUI({
+    tb <- calib(); req(tb)
+    ## report on the block with the most samples; a handful of samples in a
+    ## minor block cannot reach a high posterior and would misdescribe the run
+    g  <- tb$group[which.max(tb$n_ids)]
+    x  <- tb[tb$group == g, ]
+    mx <- x$max_post[1]
+    cur <- input$post_cut
+    usable <- x$cutoff <= mx
+    rng <- if (any(usable)) range(x$n_individuals[usable]) else c(NA, NA)
+    within <- x$cutoff[x$exp_false_merges <= 1 & usable]
+
+    if (mx < cur) {
+      sug <- if (any(usable)) max(x$cutoff[usable]) else NA
+      return(tags$div(class = "gid-flag",
+        tags$b("This is why every sample is coming back as its own animal. "),
+        sprintf("The most similar pair in your data reaches a posterior of %s, and your cutoff is %s. ",
+                signif(mx, 6), cur),
+        "Nothing can clear the bar, so nothing matches. That is a statement about ",
+        "the bar, not about your animals.",
+        if (!is.na(sug)) tags$div(style = "margin-top:.4rem",
+          tags$b(sprintf("Try %s instead.", sug)),
+          sprintf(" At that cutoff you would expect %.2f false merges across the whole dataset.",
+                  x$exp_false_merges[x$cutoff == sug]))
+        else tags$div(style = "margin-top:.4rem",
+          "No cutoff on the scale works here, which means the panel itself is ",
+          "not separating your samples. Check the loci in use, the minimum loci ",
+          "per pair, and whether the error rates are wildly off.")))
+    }
+
+    tags$div(class = "gid-flag gid-ok",
+      tags$b(sprintf("Across every cutoff your panel can actually reach, the answer moves between %d and %d animals.",
+                     rng[1], rng[2])),
+      if (length(within) == sum(usable))
+        sprintf(" Expected false merges stay under 1 throughout, so within this range the cutoff is barely doing any work \u2014 report the range and move on.")
+      else sprintf(" Expected false merges stay under 1 for cutoffs of %s and above.",
+                   min(within)),
+      tags$div(style = "margin-top:.4rem",
+        sprintf("At your current %s: expect %.2f false merges and %.1f missed recapture pairs. ",
+                cur, x$exp_false_merges[which.min(abs(x$cutoff - cur))],
+                x$exp_missed_pairs[which.min(abs(x$cutoff - cur))]),
+        "Raising it further trades a fraction of a merge for many missed matches."))
+  })
+
+  output$plot_calib <- renderPlot({
+    tb <- calib(); req(tb)
+    g <- tb$group[which.max(tb$n_ids)]
+    x <- tb[tb$group == g, ]
+    d <- rbind(data.frame(cutoff = x$cutoff, v = x$exp_false_merges,
+                          what = "Expected false merges (two animals joined)"),
+               data.frame(cutoff = x$cutoff, v = x$exp_missed_pairs,
+                          what = "Expected missed pairs (one animal split)"))
+    ggplot(d, aes(factor(cutoff), v + 0.01, colour = what, group = what)) +
+      geom_line(linewidth = 0.9) + geom_point(size = 2.4) +
+      geom_vline(xintercept = which.min(abs(x$cutoff - input$post_cut)),
+                 linetype = 2, colour = ACCENT) +
+      scale_y_log10() +
+      scale_colour_manual(values = c(INK, ACCENT)) +
+      labs(x = "Posterior cutoff", y = "Expected number of errors (log scale)",
+           colour = NULL,
+           subtitle = paste("Dashed line = your current setting. Both curves are in the same units,",
+                            "so\nwhere they cross is where the two kinds of mistake are equally likely.")) +
+      theme_gid()
+  })
+
+  output$tbl_calib <- renderDT({
+    tb <- calib(); req(tb)
+    x <- tb[, c("group", "cutoff", "n_individuals", "n_accepted",
+                "exp_false_merges", "exp_missed_pairs")]
+    x$exp_false_merges <- round(x$exp_false_merges, 3)
+    x$exp_missed_pairs <- round(x$exp_missed_pairs, 1)
+    dt(x)
   })
 
   output$plot_sweep <- renderPlot({

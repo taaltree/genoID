@@ -777,9 +777,15 @@ gid_by_group <- function(gt, group, fun, ...) {
 
 gid_summarise_assignment <- function(asg) {
   tb <- table(asg$individual)
+  n <- as.integer(tb)
   list(n_samples = nrow(asg), n_individuals = length(tb),
        n_singletons = sum(tb == 1), max_cluster = max(tb),
        recapture_rate = 1 - length(tb) / nrow(asg),
+       ## how many times a typical animal was actually sampled -- easier to
+       ## reason about than a rate, and the median says something the mean
+       ## cannot when one animal dominates the collection
+       mean_samples = mean(n), median_samples = stats::median(n),
+       mean_recaptures = mean(n - 1), median_recaptures = stats::median(n - 1),
        cluster_sizes = as.integer(table(tb)))
 }
 
@@ -1449,6 +1455,59 @@ gid_lr_finish <- function(ids, lrm, n_cmpm, prior_same, post_cut, min_loci,
 }
 
 
+#' What does the posterior cutoff actually cost you?
+#'
+#' The cutoff is usually picked by convention, which is unsatisfying because it
+#' is the one number with no data behind it. It does not have to be: the method
+#' already returns a probability per pair, so the expected number of mistakes at
+#' any cutoff can simply be added up.
+#'
+#'   expected false merges  = sum over ACCEPTED pairs of (1 - posterior)
+#'   expected missed pairs  = sum over REJECTED pairs of posterior
+#'
+#' A merge joins two animals into one and biases abundance down; a miss splits
+#' one animal into two and biases abundance up. Both are visible here, in the
+#' same units, so the cutoff becomes a stated trade rather than a habit.
+#'
+#' Two honest caveats. Pairs are not independent -- transitivity means one
+#' accepted pair can merge a whole cluster -- so these are pair-level counts,
+#' not individual-level ones. And they trust the model's own posteriors, so they
+#' are only as good as the error rates and the alternative hypothesis you gave
+#' it. Read them alongside the sensitivity grid, not instead of it.
+#'
+#' @param budget the number of false merges you are willing to expect across
+#'   the whole dataset. The recommendation is the most permissive cutoff that
+#'   stays inside it, since being stricter than necessary only loses recaptures.
+gid_calibrate_threshold <- function(pairs, ids, min_loci = 15, linkage = "single",
+                                    cuts = NULL, budget = 1) {
+  p <- pairs[pairs$n_compared >= min_loci, , drop = FALSE]
+  if (!nrow(p) || is.null(p$posterior_same)) return(NULL)
+  post <- p$posterior_same
+  if (is.null(cuts))
+    cuts <- sort(unique(c(0.5, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995, 0.999,
+                          0.9995, 0.9999, 0.99999)))
+
+  tab <- do.call(rbind, lapply(cuts, function(t) {
+    acc <- post >= t
+    m <- p[acc, , drop = FALSE]
+    data.frame(cutoff = t,
+               n_individuals = length(unique(gid_resolve(m, ids, linkage)$assignment$individual)),
+               n_accepted = sum(acc),
+               exp_false_merges = sum(1 - post[acc]),
+               exp_missed_pairs = sum(post[!acc]),
+               fdr = if (sum(acc)) sum(1 - post[acc]) / sum(acc) else 0,
+               stringsAsFactors = FALSE)
+  }))
+
+  ok <- which(tab$exp_false_merges <= budget)
+  rec <- if (length(ok)) tab$cutoff[min(ok)] else NA_real_
+  attr(tab, "recommended") <- rec
+  attr(tab, "budget") <- budget
+  attr(tab, "max_posterior") <- max(post)
+  tab
+}
+
+
 #' Per-sample power: how identifiable is this sample given only the loci it
 #' actually has? This is the honest answer to "can I trust a singleton?"
 gid_sample_power <- function(gt, pid_tab) {
@@ -1611,8 +1670,9 @@ gid_compare_methods <- function(results) {
   summ <- do.call(rbind, lapply(names(results), function(nm) {
     s <- gid_summarise_assignment(results[[nm]]$assignment)
     data.frame(method = nm, n_samples = s$n_samples, n_individuals = s$n_individuals,
-               n_singletons = s$n_singletons, max_cluster = s$max_cluster,
-               recapture_rate = s$recapture_rate,
+               n_singletons = s$n_singletons,
+               median_samples = s$median_samples, mean_samples = s$mean_samples,
+               max_cluster = s$max_cluster, recapture_rate = s$recapture_rate,
                n_conflicting_clusters = results[[nm]]$n_conflict %||% NA_integer_)
   }))
   m <- outer(seq_along(parts), seq_along(parts),

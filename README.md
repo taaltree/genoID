@@ -256,6 +256,51 @@ homozygous consensus, and the false-allele rate is forced to **exactly zero**.
 On this dataset that estimator returns 0.00% where maximum likelihood, given the
 same replicates, returns 1.5%.
 
+## Every sample coming back as a unique individual?
+
+That is a symptom, not a result. It almost always means the posterior cutoff is
+set above what your panel can supply. A panel carries a finite amount of
+evidence, so there is a maximum posterior no pair can exceed — the app reports
+that ceiling and suggests a workable cutoff.
+
+## How to choose the posterior cutoff
+
+0.999 is a convention, not a result. It doesn't have to be a guess: the method
+gives every pair a probability, so the cost of any cutoff can be added up.
+
+```
+E[false merges] = sum over ACCEPTED pairs of (1 - p)     two animals joined
+E[missed pairs] = sum over REJECTED pairs of p           one animal split
+```
+
+Both are in pairs, so the choice becomes a stated trade. The Individuals tab
+plots both curves against the cutoff and tells you where you are on them.
+
+On the AITRC panel:
+
+| Cutoff | Individuals | E[false merges] | E[missed pairs] |
+|---|---|---|---|
+| 0.95 | 56 | 0.03 | 2.4 |
+| 0.999 | 59 | 0.02 | 9.4 |
+| 0.9999 | 66 | 0.01 | 37 |
+| 0.99999 | **100** | 0.00 | **241** |
+
+Every cutoff from 0.5 to 0.9995 costs under one expected false merge while the
+count moves only 55 → 59, so within that range the cutoff is barely doing any
+work. Push to 0.99999 and you buy a 0.02 reduction in false merges for 241
+missed pairs — that is collapse, not caution.
+
+**A defensible procedure:** check the ceiling first; set an error budget in
+pairs rather than a probability; take the most permissive cutoff inside it;
+check the answer sits on a plateau; report the range, not the point. *"55 to 59
+animals across every defensible cutoff"* is a better result than a single
+number.
+
+The two errors aren't symmetric: a split invents an animal **and** manufactures
+a spurious "caught once" record, which is what capture-recapture estimators are
+most sensitive to. For abundance work, splitting is usually the more damaging
+direction.
+
 ## Jargon
 
 Tables show plain-English headings, not the raw column names. Hover any heading
