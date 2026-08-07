@@ -89,6 +89,16 @@ EX_A    <- c("A/G", "C/C", "T/T", "A/A", "G/T", "C/T")
 EX_B    <- c("A/A", "C/C", "T/T", "A/A", "G/T", "--")
 EX_CLS  <- c("diff", "", "", "", "", "miss")
 
+## render a small mock file layout
+.file_table <- function(header, rows, note_cols = character(0)) {
+  cls <- function(h) if (h %in% note_cols) "diff" else ""
+  tags$table(class = "m-ex",
+    tags$thead(tags$tr(lapply(header, function(h) tags$th(class = cls(h), h)))),
+    tags$tbody(lapply(rows, function(r)
+      tags$tr(Map(function(v, h) tags$td(class = cls(h), v), r, header)))))
+}
+
+
 .example_table <- function() {
   tags$table(class = "m-ex",
     tags$thead(tags$tr(tags$th("Locus"), lapply(EX_LOCI, tags$th))),
@@ -112,6 +122,7 @@ methods_panel <- function() {
       card(card_header("Contents"), class = "m-toc",
         tags$div(class = "m-toc-sec", "Start here"),
         tags$a(href = "#m-problem", "The problem"),
+        tags$a(href = "#m-format", "Your file format"),
         tags$a(href = "#m-notation", "Notation"),
         tags$a(href = "#m-example", "A worked example"),
         tags$a(href = "#m-prep", "Preparing the data"),
@@ -158,6 +169,90 @@ methods_panel <- function() {
              "\u201cdifferent animal\u201d you are testing against.")),
         .p("Every method on this page is a different answer to one question: ",
            tags$b("how many differing loci are still consistent with one animal?")),
+
+        # -------------------------------------------------------------- format
+        .h("What your file has to look like", id = "m-format"),
+        .p(class = "m-lead",
+          "One column per locus, and one row per sample — or one row per PCR ",
+          "replicate if you want to use those directly. CSV, TSV or Excel. ",
+          "Everything else the app works out for itself."),
+
+        .s("Format A — one row per sample"),
+        .p("The usual case: you have already collapsed any replicates into a ",
+           "consensus genotype, and each sample appears once."),
+        .file_table(
+          c("SampleID", "Species", "Sex", "LOC01", "LOC02", "LOC03", "LOC04"),
+          list(c("WFS_001", "wolf", "XX", "AG", "CC", "00", "CT"),
+               c("WFS_002", "wolf", "XY", "AA", "CT", "TT", "CT"),
+               c("WFS_003", "coyote", "XX", "AG", "CC", "TT", "00")),
+          note_cols = "SampleID"),
+        .p("The only column the app truly needs is the sample identifier. ",
+           tags$code("Species"), " and ", tags$code("Sex"), " here are ordinary ",
+           "extra columns — useful, but named however you like and not ",
+           "required."),
+
+        .s("Format B — one row per PCR replicate"),
+        .p("If you genotyped each sample more than once, give the app every ",
+           "reaction. It will notice the repeated sample identifiers and offer to ",
+           "use them directly, which is better than collapsing them first (see ",
+           tags$a(href = "#m-reps", "Using PCR replicates"), ")."),
+        .file_table(
+          c("SampleID", "Rep", "Species", "LOC01", "LOC02", "LOC03", "LOC04"),
+          list(c("WFS_001", "a", "wolf", "AG", "CC", "00", "CT"),
+               c("WFS_001", "b", "wolf", "AA", "CC", "CT", "CT"),
+               c("WFS_001", "c", "wolf", "AG", "00", "00", "CT"),
+               c("WFS_001", "consensus", "wolf", "AG", "CC", "00", "CT"),
+               c("WFS_002", "a", "wolf", "AA", "CT", "TT", "CT")),
+          note_cols = c("SampleID", "Rep")),
+        .p("The replicate label column can be called anything; you pick it in the ",
+           "sidebar. If your file also carries pre-computed ", tags$code("consensus"),
+           " rows, list that label under ", tags$b("Row labels to exclude"),
+           " so it is not counted as a fourth reaction. The app finds and ",
+           "pre-selects labels like ", tags$code("consensus"), " for you."),
+        .plain("Same file, both ways. A file in Format B can be analysed either ",
+               "as replicates or collapsed to a consensus, and you can switch ",
+               "between the two in the sidebar to see whether it changes anything."),
+
+        .s("How to write a genotype"),
+        tags$table(class = "m-tbl",
+          tags$thead(tags$tr(tags$th("Thing"), tags$th("Write it like this"), tags$th("Notes"))),
+          tags$tbody(
+            tags$tr(tags$td("SNP genotype"), tags$td(tags$code("AG"), ", ", tags$code("CC"), ", ", tags$code("T/C")),
+                    tags$td("Two alleles in one cell. A separator is optional.")),
+            tags$tr(tags$td("Microsatellite"), tags$td(tags$code("120/124"), ", ", tags$code("120|124")),
+                    tags$td("A separator is required, so the two allele sizes can be told apart.")),
+            tags$tr(tags$td("Missing"), tags$td(tags$code("00"), ", ", tags$code("NA"), ", ", tags$code("-"), ", ", tags$code("?"), ", blank"),
+                    tags$td("All recognised. Missing loci are skipped, not counted against a pair.")),
+            tags$tr(tags$td("Allele order"), tags$td(tags$code("AG"), " = ", tags$code("GA")),
+                    tags$td("Sorted before comparison, so reversed cells do not become false differences.")),
+            tags$tr(tags$td("Quality flags"), tags$td(tags$code("AG*"), ", ", tags$code("CT?")),
+                    tags$td("The flag is stripped and the genotype kept. If a flag means “do not trust this”, set those cells to missing before uploading.")))),
+        tags$div(class = "m-note",
+          tags$b("One column per locus, not two."), " If your file has ",
+          tags$code("LOC01a"), " and ", tags$code("LOC01b"), " as separate ",
+          "columns — the layout GenAlEx and allelematch use internally — ",
+          "join each pair into one column first, for example ", tags$code("AG"),
+          " or ", tags$code("120/124"), ". The app converts back to allele pairs ",
+          "internally when it hands data to allelematch."),
+
+        .s("What the app does without being asked"),
+        tags$table(class = "m-tbl",
+          tags$thead(tags$tr(tags$th("Step"), tags$th("What happens"))),
+          tags$tbody(
+            tags$tr(tags$td("Finds the loci"),
+                    tags$td("Columns that parse as diploid genotypes with a consistent alphabet. Shown in the sidebar for you to correct — every column is offerable, so nothing it missed is out of reach.")),
+            tags$tr(tags$td("Finds the sample column"),
+                    tags$td("Prefers a name that looks like an identifier and ignores columns that are just numbers, such as read counts.")),
+            tags$tr(tags$td("Sorts alleles"), tags$td("So allele order never creates a false difference.")),
+            tags$tr(tags$td("Drops dead loci"),
+                    tags$td("Monomorphic markers, and any below your minimum call rate, are removed and reported.")))),
+        tags$div(class = "m-note",
+          tags$b("Two things to do yourself."), " Remove species-diagnostic and ",
+          "sex markers from the locus list — they are near-fixed within a ",
+          "species, so they add no power and distort the frequency model. And set ",
+          tags$b("Analyse separately by"), " to your species or population column, ",
+          "so samples from different groups are never compared and each group gets ",
+          "its own allele frequencies."),
 
         # ----------------------------------------------------------- notation
         .h("Notation", id = "m-notation"),

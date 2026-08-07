@@ -113,20 +113,79 @@ Only the two likelihood methods can use replicates. Exact matching, the mismatch
 threshold, GenAlEx and allelematch compare one genotype per sample, so they keep
 running on a consensus and the comparison tab stays meaningful.
 
-## Your data format
+## Your file format
 
-One row per sample, one column per locus. Genotypes as two alleles in one cell
-(`AG`) or separated (`120/124`). Missing data as `00`, `NA`, or blank. CSV, TSV,
-or Excel. Loci are detected automatically and shown in the sidebar for you to
-correct.
+**One column per locus.** One row per sample, or one row per PCR replicate.
+CSV, TSV or Excel.
 
-Two things to do before you trust the output:
+### Format A — one row per sample
+
+Use this when replicates are already collapsed to a consensus.
+
+| SampleID | Species | Sex | LOC01 | LOC02 | LOC03 |
+|---|---|---|---|---|---|
+| WFS_001 | wolf | XX | AG | CC | 00 |
+| WFS_002 | wolf | XY | AA | CT | TT |
+| WFS_003 | coyote | XX | AG | CC | TT |
+
+The only column the app truly needs is the sample identifier. `Species` and
+`Sex` are ordinary extra columns — name them whatever you like, or leave them
+out.
+
+### Format B — one row per PCR replicate
+
+Repeat the sample ID once per reaction. The app notices and offers to use every
+observation directly, which beats collapsing them first.
+
+| SampleID | Rep | Species | LOC01 | LOC02 | LOC03 |
+|---|---|---|---|---|---|
+| WFS_001 | a | wolf | AG | CC | 00 |
+| WFS_001 | b | wolf | AA | CC | CT |
+| WFS_001 | c | wolf | AG | 00 | 00 |
+| WFS_001 | consensus | wolf | AG | CC | 00 |
+| WFS_002 | a | wolf | AA | CT | TT |
+
+The replicate label column can be called anything; you pick it in the sidebar.
+If your file also carries pre-computed `consensus` rows, list that label under
+**Row labels to exclude** so it is not counted as a fourth reaction — the app
+finds and pre-selects labels like `consensus` for you.
+
+A Format B file can be analysed **either way**, and you can switch between them
+in the sidebar to see whether it changes anything.
+
+### Writing a genotype
+
+| Thing | Write it like this | Notes |
+|---|---|---|
+| SNP genotype | `AG`, `CC`, `T/C` | Two alleles in one cell; separator optional |
+| Microsatellite | `120/124`, `120\|124` | Separator **required**, so the two sizes can be told apart |
+| Missing | `00`, `NA`, `-`, `?`, blank | All recognised. Missing loci are skipped, not counted against a pair |
+| Allele order | `AG` = `GA` | Sorted before comparison, so reversed cells never become false differences |
+| Quality flags | `AG*`, `CT?` | Flag stripped, genotype kept. If a flag means "do not trust this", set those cells to missing first |
+
+> **One column per locus, not two.** If your file has `LOC01a` and `LOC01b` as
+> separate columns — the layout GenAlEx and allelematch use internally — join
+> each pair into a single column first. The app converts back internally when it
+> hands data to allelematch.
+
+### What the app does for you
+
+- **Finds the loci** — columns that parse as diploid genotypes with a consistent
+  alphabet, then lists them in the sidebar for you to correct. Every column is
+  offerable, so nothing it missed is out of reach.
+- **Finds the sample column** — prefers identifier-looking names and ignores
+  pure numbers like read counts.
+- **Sorts alleles** so order never creates a false difference.
+- **Drops dead loci** — monomorphic, or below your minimum call rate — and says
+  which.
+
+### Two things to do yourself
 
 1. **Remove species-diagnostic and sex markers** from the locus list. They are
    near-fixed within a species, so they add no power and distort the allele
    frequencies every probability depends on.
 2. **Set "analyse separately by"** to your species or population column, so
-   samples from different groups are never matched and each gets its own
+   samples from different groups are never compared and each gets its own
    frequencies.
 
 ## Running it locally

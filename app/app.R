@@ -233,6 +233,17 @@ ui <- page_navbar(
     .gid-empty h4{color:%s;font-weight:600;font-size:1.05rem;margin-bottom:.4rem}
     .gid-empty p{font-size:.88rem;max-width:34rem;margin:0 auto .35rem}
     .dataTables_wrapper{font-size:.86rem}
+    .gid-fmt{display:inline-block;vertical-align:top;text-align:left;margin:1rem .9rem 0;
+      background:#fff;border:1px solid #e3e9ef;border-radius:4px;padding:.8rem 1rem}
+    .gid-fmt-h{font-size:.7rem;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+      color:%s;margin-bottom:.45rem}
+    table.gid-ex{border-collapse:collapse;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      font-size:.78rem}
+    table.gid-ex th{font-family:system-ui,sans-serif;font-size:.64rem;letter-spacing:.04em;
+      text-transform:uppercase;color:#8fa3a6;font-weight:600;padding:.15rem .6rem .3rem;
+      border-bottom:1px solid #dde5e4;text-align:left}
+    table.gid-ex td{padding:.22rem .6rem;border-bottom:1px solid #f0f4f3;color:#33474d}
+    table.gid-ex .hi{background:#f6eddc;color:#a8762a}
     th.gid-th-tip{cursor:help;border-bottom:1px dotted %s!important}
     th.gid-th-tip:hover{color:%s!important}
     .gid-tip{cursor:help}
@@ -248,12 +259,14 @@ ui <- page_navbar(
     .gid-mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
       gap:.2rem 1.6rem;margin-top:.5rem}
   ", MUTED, MUTED, SOFT, INK, INK, INK, INK, ACCENT, MUTED, INK, ACCENT, INK,
-     MUTED, INK)))),
+     MUTED, INK, INK)))),
 
   sidebar = sidebar(
     width = 330, class = "bg-white",
 
     fileInput("file", "Genotype file", accept = c(".csv", ".tsv", ".txt", ".xlsx")),
+    hint("One column per locus. One row per sample, or one row per PCR ",
+         "replicate. See ", tags$b("Your file format"), " on the Methods tab."),
     actionLink("load_demo", "or load the example dataset", class = "gid-hint"),
     uiOutput("demo_note"),
     conditionalPanel("output.is_excel == true",
@@ -579,13 +592,45 @@ server <- function(input, output, session) {
 
   output$empty_state <- renderUI({
     if (!is.null(raw())) return(NULL)
+    ex <- function(hdr, rows, hi) tags$table(class = "gid-ex",
+      tags$thead(tags$tr(lapply(hdr, function(h)
+        tags$th(class = if (h %in% hi) "hi" else "", h)))),
+      tags$tbody(lapply(rows, function(r) tags$tr(Map(function(v, h)
+        tags$td(class = if (h %in% hi) "hi" else "", v), r, hdr)))))
+
     tags$div(class = "gid-empty",
       icon("dna", class = "fa-2x", style = paste0("color:", SOFT, ";margin-bottom:.8rem")),
       tags$h4("Upload a genotype table to begin"),
-      tags$p("One row per sample, one column per locus. Genotypes as two alleles ",
-             "in a single cell (AG) or separated (120/124). Missing data as 00, ",
-             "NA or blank. CSV, TSV or Excel."),
-      tags$p("Loci are detected automatically and shown in the sidebar for you to correct."))
+      tags$p("One column per locus. Genotypes as two alleles in one cell (",
+             tags$code("AG"), ") or separated (", tags$code("120/124"), "). ",
+             "Missing as ", tags$code("00"), ", ", tags$code("NA"), " or blank. ",
+             "CSV, TSV or Excel."),
+
+      tags$div(class = "gid-fmt",
+        tags$div(class = "gid-fmt-h", "One row per sample"),
+        ex(c("SampleID", "Species", "LOC01", "LOC02", "LOC03"),
+           list(c("WFS_001", "wolf", "AG", "CC", "00"),
+                c("WFS_002", "wolf", "AA", "CT", "TT")), "SampleID"),
+        tags$p(class = "gid-hint", style = "margin:.45rem 0 0",
+               "Use this when replicates are already collapsed to a consensus.")),
+
+      tags$div(class = "gid-fmt",
+        tags$div(class = "gid-fmt-h", "One row per PCR replicate"),
+        ex(c("SampleID", "Rep", "Species", "LOC01", "LOC02", "LOC03"),
+           list(c("WFS_001", "a", "wolf", "AG", "CC", "00"),
+                c("WFS_001", "b", "wolf", "AA", "CC", "CT"),
+                c("WFS_001", "c", "wolf", "AG", "00", "00"),
+                c("WFS_002", "a", "wolf", "AA", "CT", "TT")),
+           c("SampleID", "Rep")),
+        tags$p(class = "gid-hint", style = "margin:.45rem 0 0",
+               "Repeat the sample ID once per reaction. The app spots this and ",
+               "offers to use every observation directly, which beats collapsing ",
+               "them first.")),
+
+      tags$p(style = "margin-top:1.2rem",
+        "Loci are detected automatically and listed in the sidebar for you to ",
+        "correct. Full details, including microsatellites and quality flags, are ",
+        "on the ", tags$b("Methods"), " tab under ", tags$b("Your file format"), "."))
   })
 
   is_excel <- reactive(!is.null(input$file) &&
