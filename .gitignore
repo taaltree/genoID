@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Real data never goes in this repo. The app runs entirely in the browser, so
+# nobody needs your genotypes on GitHub for it to work.
+# ---------------------------------------------------------------------------
+outputs/
+*.xlsx
+*.xls
+
+# every csv except the simulated example
+*.csv
+!app/demo/demo_genotypes.csv
+
+# The written report names individual samples and reports derived results, so
+# it stays out of the public repo. Share it as a private link instead. To
+# publish it later, delete this line and restore the "Copy the report" step in
+# the deploy workflow.
+report/
+
+# R / editor cruft
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store
+*.Rproj
+_site/
+docs/
