@@ -38,6 +38,60 @@ theme_gid <- function() {
 
 hint <- function(...) tags$p(class = "gid-hint", ...)
 
+## One place describing every method: drives the picker, the sidebar sections,
+## and the explainer at the top of the Individuals tab.
+GID_METHODS <- list(
+  probabilistic = list(
+    label  = "Likelihood ratio",
+    anchor = "m-lr", tag = "recommended",
+    blurb  = paste("Asks how much more probable the two observed genotypes are if they",
+                   "came from one animal than from two, using an explicit dropout and",
+                   "false-allele error model, then converts that evidence into a",
+                   "posterior probability using a prior estimated from your data."),
+    good   = "You want a probability for every pair and control over how strict the cutoff is.",
+    watch  = "You must state what \u201ca different animal\u201d means. For group-living species that is full siblings, not unrelated animals."),
+  sethi = list(
+    label  = "Sethi et al. (2016)",
+    anchor = "m-sethi", tag = "recommended",
+    blurb  = paste("Same likelihood, but divides by whichever relationship best explains",
+                   "the pair rather than one you nominate, and accepts a match on evidence",
+                   "alone (\u039b > 1) with no prior."),
+    good   = "You do not want to choose an alternative hypothesis, or to argue about a prior.",
+    watch  = "\u039b > 1 takes no account of how many pairs you tested, so it merges more on large datasets."),
+  threshold = list(
+    label  = "Mismatch threshold",
+    anchor = "m-thresh", tag = "gut check",
+    blurb  = paste("Calls two samples the same animal when they differ at no more than k",
+                   "loci. The sweep on the comparison tab shows how much the answer",
+                   "depends on k."),
+    good   = "A quick, transparent check that everyone understands.",
+    watch  = "With no gap in the mismatch distribution, k decides your answer rather than the data."),
+  genalex = list(
+    label  = "GenAlEx Matches",
+    anchor = "m-genalex", tag = "familiar",
+    blurb  = paste("Reproduces GenAlEx's Multilocus \u2192 Matches routine: the match",
+                   "distribution, exact matches as individuals, near matches flagged for",
+                   "inspection, and P(ID) / P(ID)sib."),
+    good   = "Continuity with what your lab already runs, and the near-match list is genuinely useful.",
+    watch  = "Identification is exact matching, so a single dropout splits one animal in two."),
+  allelematch = list(
+    label  = "allelematch",
+    anchor = "m-am", tag = "gut check",
+    blurb  = paste("Galpern et al. (2012). Scores dissimilarity as the fraction of",
+                   "mismatching alleles, clusters, and picks its own threshold by",
+                   "minimising samples it cannot classify."),
+    good   = "An independent published check that chooses its own settings.",
+    watch  = "Built for microsatellites; on dense SNP panels with missing data it tends to over-split."),
+  exact = list(
+    label  = "Exact match",
+    anchor = "m-exact", tag = "baseline",
+    blurb  = "Same animal only if identical at every locus where both samples were called.",
+    good   = "A baseline. If it agrees with everything else, your genotypes are clean.",
+    watch  = "It cannot express doubt, and one dropout splits an animal in two.")
+)
+GID_METHOD_CHOICES <- setNames(names(GID_METHODS),
+                               vapply(GID_METHODS, `[[`, "", "label"))
+
 vbox <- function(title, id, ico, theme = "light")
   value_box(title, textOutput(id, inline = TRUE), showcase = icon(ico),
             theme = theme, showcase_layout = showcase_left_center(width = "58px"),
@@ -56,6 +110,7 @@ dt <- function(x, ...) {
 
 # ============================================================================ UI
 ui <- page_navbar(
+  id = "nav",
   fillable = FALSE,   # let explicit plot/card heights stand instead of being flexed
   title = tags$span(tags$strong("genoID"),
                     tags$span(class = "gid-sub", "unique individuals from consensus genotypes")),
@@ -68,7 +123,77 @@ ui <- page_navbar(
     heading_font = font_collection(font_google("Source Sans 3", local = FALSE),
                                    "system-ui", "sans-serif"),
     "navbar-bg" = "#ffffff", "body-bg" = "#fbfcfd"),
-  header = tags$head(katex_head(), tags$style(HTML(sprintf("
+  header = tags$head(
+    katex_head(),
+    # Files are built in the browser and handed to a Blob, rather than served
+    # from a Shiny download route. Under WebAssembly there is no server to
+    # serve that route, and the service-worker fallback fails in Chrome
+    # (Chromium bug 468227). A Blob works the same everywhere.
+    tags$script(HTML("
+      // Registered once only. Shiny appends to its handler-order list every
+      // time a name is registered, so registering twice dispatches every
+      // message twice and the browser downloads two copies of each file.
+      if (!window.__gidDownloadReady) {
+      window.__gidDownloadReady = true;
+      Shiny.addCustomMessageHandler('gid_download', function(m) {
+        var blob;
+        if (m.b64) {
+          var bin = atob(m.data), arr = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          blob = new Blob([arr], {type: m.type});
+        } else {
+          var txt = (m.type.indexOf('csv') >= 0 ? '\\ufeff' : '') + m.data;
+          blob = new Blob([txt], {type: m.type});
+        }
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = m.filename; a.style.display = 'none';
+        document.body.appendChild(a); a.click();
+        setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 2000);
+      });
+      // Plots rendered while their tab is hidden keep the width they had when
+      // hidden, so they come back the wrong size. Nudge Shiny to re-measure
+      // whenever a tab is shown. It must be a jQuery-triggered resize --
+      // Shiny binds through jQuery and ignores a plain native resize event.
+      $(document).on('shown.bs.tab', function () {
+        setTimeout(function () { $(window).trigger('resize'); }, 60);
+      });
+      // The Methods tab lays out after the nav switch, so poll briefly for the
+      // target section. The page body does not scroll -- bslib scrolls an inner
+      // container -- so find that container and move it, rather than relying on
+      // scrollIntoView finding the right ancestor.
+      Shiny.addCustomMessageHandler('gid_scroll', function(m) {
+        var tries = 0;
+        (function seek() {
+          var el = document.getElementById(m.id);
+          if (el && el.getBoundingClientRect().top !== 0) {
+            var c = el.parentElement;
+            while (c && !(c.scrollHeight > c.clientHeight + 5 &&
+                          /(auto|scroll)/.test(getComputedStyle(c).overflowY)))
+              c = c.parentElement;
+            // Honour prefers-reduced-motion. Smooth scrolling is also silently
+            // ignored in some environments, so this doubles as the reliable path.
+            var reduce = window.matchMedia &&
+                         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+            var how = reduce ? 'auto' : 'smooth';
+            if (c) {
+              var top = el.getBoundingClientRect().top - c.getBoundingClientRect().top +
+                        c.scrollTop - 16;
+              c.scrollTo({top: top, behavior: how});
+              // if smooth was ignored, land it anyway
+              setTimeout(function () {
+                if (Math.abs(c.scrollTop - top) > 40) c.scrollTop = top;
+              }, 600);
+            } else {
+              el.scrollIntoView({behavior: how, block: 'start'});
+            }
+            return;
+          }
+          if (++tries < 25) setTimeout(seek, 120);
+        })();
+      });
+      }")),
+    tags$style(HTML(sprintf("
     .gid-sub{font-weight:400;color:%s;font-size:.78rem;margin-left:.6rem;letter-spacing:.02em}
     .gid-hint{color:%s;font-size:.82rem;margin:.15rem 0 .8rem;line-height:1.45}
     .card{box-shadow:0 1px 3px rgba(29,53,87,.07);border:1px solid #e3e9ef}
@@ -89,7 +214,18 @@ ui <- page_navbar(
     .gid-empty h4{color:%s;font-weight:600;font-size:1.05rem;margin-bottom:.4rem}
     .gid-empty p{font-size:.88rem;max-width:34rem;margin:0 auto .35rem}
     .dataTables_wrapper{font-size:.86rem}
-  ", MUTED, MUTED, SOFT, INK, INK, INK, INK, ACCENT, MUTED, INK)))),
+    .gid-mhead{background:#fff;border:1px solid #e3e9ef;border-left:3px solid %s;
+      border-radius:0 4px 4px 0;padding:.9rem 1.1rem;margin-bottom:1rem;
+      box-shadow:0 1px 3px rgba(29,53,87,.06)}
+    .gid-mhead h5{font-size:1.02rem;font-weight:600;color:%s;margin:0 0 .35rem}
+    .gid-mhead p{font-size:.88rem;color:#4a6067;margin:.3rem 0;line-height:1.5}
+    .gid-mtag{display:inline-block;font-size:.62rem;font-weight:700;letter-spacing:.08em;
+      text-transform:uppercase;padding:.14em .5em;border-radius:2px;margin-left:.55rem;
+      vertical-align:.18em;background:#f6eddc;color:#a8762a}
+    .gid-mtag.chk{background:#e3efef;color:#0f6b73}
+    .gid-mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));
+      gap:.2rem 1.6rem;margin-top:.5rem}
+  ", MUTED, MUTED, SOFT, INK, INK, INK, INK, ACCENT, MUTED, INK, ACCENT, INK)))),
 
   sidebar = sidebar(
     width = 330, class = "bg-white",
@@ -114,49 +250,74 @@ ui <- page_navbar(
          "power and distort the frequency model."),
     actionLink("reset_loci", "Reset to detected", class = "gid-hint"),
 
+    tags$hr(style = "margin:.9rem 0 .8rem"),
+
+    selectInput("method", "Method for the Individuals tab",
+                choices = GID_METHOD_CHOICES, selected = "probabilistic"),
+    uiOutput("method_hint"),
+
+    ## Settings for the chosen method. The other methods keep their values while
+    ## hidden, so the comparison tab can still run all six.
+    conditionalPanel(
+      "input.method == 'probabilistic'",
+      selectInput("kinship", "Compare against", selected = "full_sib",
+                  choices = c("Full siblings (conservative)" = "full_sib",
+                              "Half siblings" = "half_sib",
+                              "Unrelated individuals" = "unrelated")),
+      hint("The alternative hypothesis. For pack- or group-living species the ",
+           "samples competing to be \"a different animal\" are usually relatives, ",
+           "so full siblings is the honest null."),
+      sliderInput("post_cut", "Posterior probability to accept a match",
+                  0.9, 0.9999, 0.999, step = 0.0001),
+      numericInput("prior", "Prior P(a random pair is a recapture)", NA,
+                   min = 0, max = 0.5, step = 0.005),
+      hint("Leave blank to estimate it from the data.")),
+
+    conditionalPanel(
+      "input.method == 'sethi'",
+      checkboxGroupInput("sethi_rel", "Competing relationships",
+                         choices = c("Unrelated" = "unrelated",
+                                     "Full siblings" = "full_sib",
+                                     "Parent-offspring" = "parent_offspring",
+                                     "Half siblings" = "half_sib"),
+                         selected = c("unrelated", "full_sib", "parent_offspring")),
+      hint("Divides by whichever of these best explains the pair, so you do not ",
+           "have to pick one. A match must beat every relationship on the list."),
+      numericInput("lambda_cut", "Accept a match when \u039b exceeds", 1, 0.01, 1e6, 1),
+      hint("The paper uses \u039b > 1. Raise it on large datasets.")),
+
+    conditionalPanel(
+      "input.method == 'threshold'",
+      numericInput("max_mismatch", "Loci allowed to differ", 1, 0, 20, 1),
+      hint("Set this inside the gap in the mismatch distribution shown on the ",
+           "Individuals tab.")),
+
+    conditionalPanel(
+      "input.method == 'genalex'",
+      numericInput("near_match", "Flag near matches within N loci", 2, 1, 10, 1),
+      hint("Near matches are listed on the comparison tab for you to inspect ",
+           "rather than merged automatically.")),
+
+    conditionalPanel(
+      "input.method == 'allelematch'",
+      hint("allelematch selects its own threshold from your data. Nothing to set.")),
+
+    conditionalPanel(
+      "input.method == 'exact'",
+      hint("No tolerance to set \u2014 that is the point of this baseline.")),
+
+    ## error model: used by both likelihood methods
+    conditionalPanel(
+      "input.method == 'probabilistic' || input.method == 'sethi'",
+      sliderInput("dropout", "Allelic dropout rate", 0, 0.20, 0.005, step = 0.001),
+      sliderInput("false_allele", "False allele rate", 0, 0.10, 0.002, step = 0.001),
+      hint("Rates of the genotypes you are uploading. Multi-replicate consensus ",
+           "calls are usually well under 0.005.")),
+
     accordion(
-      open = "probabilistic",
-
+      open = FALSE,
       accordion_panel(
-        "Probabilistic settings", value = "probabilistic", icon = icon("wave-square"),
-        selectInput("kinship", "Compare against", selected = "full_sib",
-                    choices = c("Full siblings (conservative)" = "full_sib",
-                                "Half siblings" = "half_sib",
-                                "Unrelated individuals" = "unrelated")),
-        hint("The alternative hypothesis. For pack- or group-living species the ",
-             "samples competing to be \"a different animal\" are usually relatives, ",
-             "so full siblings is the honest null."),
-        sliderInput("post_cut", "Posterior probability to accept a match",
-                    0.9, 0.9999, 0.999, step = 0.0001),
-        sliderInput("dropout", "Allelic dropout rate", 0, 0.20, 0.005, step = 0.001),
-        sliderInput("false_allele", "False allele rate", 0, 0.10, 0.002, step = 0.001),
-        hint("These are the rates of the genotypes you are uploading. If those are ",
-             "already multi-replicate consensus calls, both are far lower than the ",
-             "per-PCR rates -- often under 0.005."),
-        numericInput("prior", "Prior P(a random pair is a recapture)", NA,
-                     min = 0, max = 0.5, step = 0.005),
-        hint("Leave blank to estimate it from the data.")
-      ),
-
-      accordion_panel(
-        "Sethi et al. (2016)", value = "sethi", icon = icon("scale-balanced"),
-        checkboxInput("run_sethi", "Run error-tolerant match calling", TRUE),
-        checkboxGroupInput("sethi_rel", "Competing relationships",
-                           choices = c("Unrelated" = "unrelated",
-                                       "Full siblings" = "full_sib",
-                                       "Parent-offspring" = "parent_offspring",
-                                       "Half siblings" = "half_sib"),
-                           selected = c("unrelated", "full_sib", "parent_offspring")),
-        hint("This method divides by whichever of these best explains the pair, so you ",
-             "do not have to pick one. A match must beat every relationship on the list."),
-        numericInput("lambda_cut", "Accept a match when \u039b exceeds", 1, 0.01, 1e6, 1),
-        hint("The paper uses \u039b > 1: the match hypothesis simply has to be more likely ",
-             "than the best alternative. That is assumption-free but takes no account of how ",
-             "many pairs you are testing, so raise it on large datasets.")
-      ),
-
-      accordion_panel(
-        "Shared settings", value = "shared", icon = icon("sliders"),
+        "Settings shared by every method", value = "shared", icon = icon("sliders"),
         numericInput("min_loci", "Minimum loci compared per pair", 15, 1, 500, 1),
         numericInput("min_sample_call", "Minimum sample call rate", 0.5, 0, 1, 0.05),
         numericInput("min_locus_call", "Minimum locus call rate", 0.25, 0, 1, 0.05),
@@ -166,19 +327,14 @@ ui <- page_navbar(
                      selected = "single"),
         hint("Single linkage lets A-B and B-C merge A, B and C. Complete linkage ",
              "requires every pair inside a cluster to match. Compare both: if the ",
-             "answer moves, some clusters are being held together by one edge.")
-      ),
-
+             "answer moves, some clusters are held together by one edge.")),
       accordion_panel(
-        "Gut-check methods", value = "gut", icon = icon("check-double"),
-        numericInput("max_mismatch", "Mismatch threshold: loci allowed to differ", 1, 0, 20, 1),
-        checkboxInput("run_genalex", "Run GenAlEx Matches (Peakall & Smouse)", TRUE),
-        numericInput("near_match", "GenAlEx: flag near matches within N loci", 2, 1, 10, 1),
-        checkboxInput("run_am", "Run allelematch (Galpern et al. 2012)", TRUE),
-        hint("allelematch picks its own threshold. It was designed for ",
-             "microsatellites and tends to over-split dense SNP panels with ",
-             "missing data.")
-      )
+        "Which methods to run", value = "which", icon = icon("list-check"),
+        hint("The comparison tab runs everything ticked here. Untick the slow ones ",
+             "if you only care about your chosen method."),
+        checkboxInput("run_sethi", "Sethi et al. (2016)", TRUE),
+        checkboxInput("run_genalex", "GenAlEx Matches", TRUE),
+        checkboxInput("run_am", "allelematch", TRUE))
     ),
 
     actionButton("run", "Identify individuals", icon = icon("play"),
@@ -234,6 +390,7 @@ ui <- page_navbar(
 
   nav_panel(
     "Individuals", icon = icon("fingerprint"),
+    uiOutput("method_header"),
     uiOutput("run_status_ind"),
     uiOutput("power_warning"),
     layout_columns(
@@ -245,9 +402,9 @@ ui <- page_navbar(
     ),
     layout_columns(
       col_widths = c(6, 6),
-      card(card_header("Evidence for every pair of samples"), plotOutput("plot_lr", height = 340),
-           hint("Each point is a pair. Pairs to the right are supported as the same ",
-                "animal; the vertical line is your acceptance threshold.")),
+      card(card_header(textOutput("evid_title", inline = TRUE)),
+           plotOutput("plot_lr", height = 340),
+           uiOutput("evid_note")),
       card(card_header("Locus mismatches between samples"), plotOutput("plot_mm", height = 340),
            hint("A clean panel gives two piles with a gap. Pairs sitting in the gap ",
                 "are the ones worth looking at by hand."))
@@ -314,17 +471,22 @@ ui <- page_navbar(
              "Every table in the app also has its own Download CSV button."),
       layout_columns(
         col_widths = c(4, 4, 4),
-        downloadButton("dl_assign", "Individual assignments", class = "btn-primary w-100"),
-        downloadButton("dl_cons",   "Consensus genotype per individual", class = "btn-outline-primary w-100"),
-        downloadButton("dl_pairs",  "All pairwise comparisons", class = "btn-outline-primary w-100")
+        actionButton("dl_assign", "Individual assignments",
+                     icon = icon("download"), class = "btn-primary w-100"),
+        actionButton("dl_cons", "Consensus genotype per individual",
+                     icon = icon("download"), class = "btn-outline-primary w-100"),
+        actionButton("dl_pairs", "All pairwise comparisons",
+                     icon = icon("download"), class = "btn-outline-primary w-100")
       ),
       tags$hr(),
       layout_columns(
         col_widths = c(4, 4, 4),
-        downloadButton("dl_all",    "Everything (zip)", class = "btn-primary w-100"),
-        downloadButton("dl_params", "Settings used (for your methods section)",
-                       class = "btn-outline-primary w-100"),
-        downloadButton("dl_script", "Equivalent R script", class = "btn-outline-primary w-100")
+        actionButton("dl_all", "Everything (zip)",
+                     icon = icon("file-zipper"), class = "btn-primary w-100"),
+        actionButton("dl_params", "Settings used (for your methods section)",
+                     icon = icon("download"), class = "btn-outline-primary w-100"),
+        actionButton("dl_script", "Equivalent R script",
+                     icon = icon("download"), class = "btn-outline-primary w-100")
       )
     ),
     card(card_header("Settings used"), verbatimTextOutput("params_txt"))
@@ -604,7 +766,40 @@ server <- function(input, output, session) {
     out
   })
 
-  best <- reactive({ r <- res(); req(r); r$methods$probabilistic })
+  ## the method the Individuals tab is showing
+  best <- reactive({
+    r <- res(); req(r)
+    m <- r$methods[[input$method]]
+    validate(need(!is.null(m), sprintf(
+      "%s was not run. Tick it under \"Which methods to run\" in the sidebar, then press Identify individuals.",
+      GID_METHODS[[input$method]]$label)))
+    m
+  })
+
+  meta <- reactive(GID_METHODS[[input$method %||% "probabilistic"]])
+
+  output$method_hint <- renderUI(
+    tags$p(class = "gid-hint", style = "margin-top:-.4rem", meta()$blurb))
+
+  output$method_header <- renderUI({
+    m <- meta()
+    tags$div(class = "gid-mhead",
+      tags$h5(m$label, tags$span(
+        class = paste("gid-mtag", if (m$tag != "recommended") "chk" else ""), m$tag)),
+      tags$p(m$blurb),
+      tags$div(class = "gid-mgrid",
+        tags$p(tags$b("Good for: "), m$good),
+        tags$p(tags$b("Watch out: "), m$watch)),
+      tags$div(style = "margin-top:.7rem",
+        actionButton("go_methods", "Read the full method and its equations",
+                     icon = icon("book-open"), class = "btn-sm btn-outline-primary")))
+  })
+
+  ## jump to the Methods tab, scrolled to this method's section
+  observeEvent(input$go_methods, {
+    nav_select("nav", "Methods")
+    session$sendCustomMessage("gid_scroll", list(id = meta()$anchor))
+  })
 
   output$vb_ind <- renderText({ length(unique(best()$assignment$individual)) })
   output$vb_single <- renderText({ sum(table(best()$assignment$individual) == 1) })
@@ -633,6 +828,7 @@ server <- function(input, output, session) {
   output$run_status_cmp <- renderUI(run_status())
 
   output$power_warning <- renderUI({
+    if (!identical(input$method, "probabilistic")) return(NULL)
     r <- res(); req(r)
     mx <- vapply(r$methods$probabilistic$by_group,
                  function(e) e$max_posterior_observed %||% NA_real_, 0)
@@ -651,18 +847,64 @@ server <- function(input, output, session) {
               ncol(r$gt), input$post_cut))
   })
 
-  output$plot_lr <- renderPlot({
-    r <- res(); pp <- r$methods$probabilistic$pairs
+  ## What counts as "evidence" depends on the method: a likelihood ratio for
+  ## the two probabilistic ones, and mismatching loci for the rest.
+  evidence <- reactive({
+    r <- res(); req(r)
+    b <- best(); pp <- b$pairs
+    ## allelematch does its own clustering internally and never exposes a
+    ## pairwise table, so fall back to the plain locus-mismatch counts, which
+    ## are a property of the data rather than of any method.
+    borrowed <- FALSE
+    if (is.null(pp) || !nrow(pp)) {
+      pp <- r$methods$exact$pairs
+      borrowed <- TRUE
+    }
+    if (is.null(pp) || !nrow(pp)) return(NULL)
     pp <- pp[pp$n_compared >= input$min_loci, ]
-    cut_lr <- min(pp$log10_LR[pp$posterior_same >= input$post_cut], Inf)
-    ggplot(pp, aes(log10_LR)) +
-      geom_histogram(bins = 60, fill = INK, colour = NA) +
-      { if (is.finite(cut_lr)) geom_vline(xintercept = cut_lr, colour = ACCENT, linetype = 2) } +
+    if (borrowed)
+      return(list(v = pp$n_mismatch, cut = NA_real_, x = "Loci that differ",
+                  kind = "mm",
+                  note = paste("allelematch clusters internally and does not expose a",
+                               "score per pair, so this shows how many loci differ",
+                               "between each pair of samples \u2014 a property of your",
+                               "data, not of the method.")))
+    if (!is.null(pp$log10_LR))
+      list(v = pp$log10_LR, cut = suppressWarnings(min(pp$log10_LR[pp$posterior_same >= input$post_cut])),
+           x = "log10 likelihood ratio", kind = "lr",
+           note = sprintf("Positive values favour one animal. Alternative hypothesis: %s.",
+                          gsub("_", " ", input$kinship)))
+    else if (!is.null(pp$log10_lambda))
+      list(v = pp$log10_lambda, cut = log10(input$lambda_cut), x = "log10 lambda", kind = "lr",
+           note = "Positive values favour one animal over the best competing relationship.")
+    else
+      list(v = pp$n_mismatch, cut = input$max_mismatch + 0.5, x = "Loci that differ",
+           kind = "mm",
+           note = "This method decides by counting differences, so the evidence is the mismatch count itself.")
+  })
+
+  output$evid_title <- renderText({
+    e <- evidence(); if (is.null(e)) "Evidence for every pair of samples"
+    else if (e$kind == "lr") "Evidence for every pair of samples"
+    else "Loci that differ between samples" })
+
+  output$evid_note <- renderUI({
+    e <- evidence(); req(e)
+    tags$p(class = "gid-hint", e$note,
+           if (is.finite(e$cut)) " The dashed line is where this method accepts a match." else "") })
+
+  output$plot_lr <- renderPlot({
+    e <- evidence(); req(e)
+    d <- data.frame(v = e$v)
+    g <- ggplot(d, aes(v)) +
       scale_y_continuous(trans = "log1p", breaks = c(0, 1, 3, 10, 30, 100, 300, 1000, 3000)) +
-      labs(x = expression(log[10] ~ "likelihood ratio"), y = "Sample pairs",
-           subtitle = sprintf("Alternative hypothesis: %s. Counts are log-scaled.",
-                              gsub("_", " ", input$kinship))) +
+      labs(x = e$x, y = "Sample pairs", subtitle = "Counts are log-scaled.") +
       theme_gid()
+    g <- g + if (e$kind == "mm")
+      geom_histogram(binwidth = 1, fill = INK, colour = "white", linewidth = 0.3)
+    else geom_histogram(bins = 60, fill = INK, colour = NA)
+    if (is.finite(e$cut)) g <- g + geom_vline(xintercept = e$cut, colour = ACCENT, linetype = 2)
+    g
   })
 
   output$plot_mm <- renderPlot({
@@ -835,7 +1077,8 @@ server <- function(input, output, session) {
       "loci used            %d  (%s)\n",
       "loci dropped by you  %s\n",
       "grouped by           %s\n",
-      "\nProbabilistic method (reported result)\n",
+      "\nMethod shown on the Individuals tab: %s\n",
+      "\nProbabilistic method\n",
       "  alternative        %s\n",
       "  posterior cutoff   %s\n",
       "  dropout rate       %s\n",
@@ -853,6 +1096,7 @@ server <- function(input, output, session) {
       paste(colnames(r$gt), collapse = " "),
       if (length(setdiff(detected(), loci()))) paste(setdiff(detected(), loci()), collapse = " ") else "none",
       if (nzchar(input$group_col %||% "")) input$group_col else "not grouped",
+      GID_METHODS[[input$method]]$label,
       input$kinship, input$post_cut, input$dropout, input$false_allele,
       if (is.na(input$prior)) "estimated from data" else as.character(input$prior),
       input$min_loci, input$linkage, input$max_mismatch,
@@ -866,22 +1110,80 @@ server <- function(input, output, session) {
   })
   output$params_txt <- renderText(params())
 
-  dlcsv <- function(name, data) downloadHandler(
-    filename = function() sprintf("genoID_%s_%s.csv", name, format(Sys.Date())),
-    content = function(f) write.csv(data(), f, row.names = FALSE))
+  ## ---- downloads -----------------------------------------------------------
+  ## Built here, handed to the browser as a Blob. No server route involved, so
+  ## this behaves identically in a local Shiny session and in the WebAssembly
+  ## build where there is no server at all.
+  send_file <- function(filename, content, type = "text/csv;charset=utf-8",
+                        b64 = FALSE) {
+    session$sendCustomMessage("gid_download", list(
+      filename = filename, data = content, b64 = b64, type = type))
+  }
+  as_csv <- function(df)
+    paste(utils::capture.output(utils::write.csv(df, row.names = FALSE)),
+          collapse = "\n")
 
-  output$dl_assign <- dlcsv("assignments", final_tbl)
-  output$dl_pairs  <- dlcsv("pairwise", reactive(best()$pairs))
-  output$dl_cons   <- dlcsv("individual_genotypes", reactive({
+  dl_button <- function(id, name, data_fn) {
+    observeEvent(input[[id]], {
+      d <- try(data_fn(), silent = TRUE)
+      if (inherits(d, "try-error") || is.null(d))
+        return(showNotification(
+          "Nothing to download yet - press Identify individuals first.",
+          type = "warning"))
+      send_file(sprintf("genoID_%s_%s.csv", name, format(Sys.Date())), as_csv(d))
+    })
+  }
+
+  dl_button("dl_assign", "assignments",           function() final_tbl())
+  dl_button("dl_pairs",  "pairwise",              function() best()$pairs)
+  dl_button("dl_cons",   "individual_genotypes",  function() {
     ic <- gid_individual_consensus(res()$gt, best()$assignment)
-    data.frame(individual = rownames(ic$genotypes), ic$genotypes) }))
-  output$dl_params <- downloadHandler(
-    filename = function() sprintf("genoID_settings_%s.txt", format(Sys.Date())),
-    content = function(f) writeLines(params(), f))
+    data.frame(individual = rownames(ic$genotypes), ic$genotypes) })
 
-  output$dl_script <- downloadHandler(
-    filename = "genoID_reproduce.R",
-    content = function(f) writeLines(sprintf(paste0(
+  observeEvent(input$dl_params, {
+    p <- try(params(), silent = TRUE)
+    if (inherits(p, "try-error"))
+      return(showNotification("Press Identify individuals first.", type = "warning"))
+    send_file(sprintf("genoID_settings_%s.txt", format(Sys.Date())), p,
+              type = "text/plain;charset=utf-8")
+  })
+
+  ## the exact gid_ call behind whatever the Individuals tab is showing
+  method_call <- reactive({
+    a <- function(...) paste(c(...), collapse = ",\n                     ")
+    switch(input$method,
+      probabilistic = sprintf("gid_method_lr,\n                     %s",
+        a(sprintf("dropout = %s", input$dropout),
+          sprintf("false_allele = %s", input$false_allele),
+          sprintf('kinship = "%s"', input$kinship),
+          sprintf("post_cut = %s", input$post_cut),
+          sprintf("min_loci = %s", input$min_loci),
+          sprintf('linkage = "%s"', input$linkage))),
+      sethi = sprintf("gid_method_sethi,\n                     %s",
+        a(sprintf("dropout = %s", input$dropout),
+          sprintf("false_allele = %s", input$false_allele),
+          sprintf('relationships = c("%s")', paste(input$sethi_rel, collapse = '", "')),
+          sprintf("lambda_cut = %s", input$lambda_cut),
+          sprintf("min_loci = %s", input$min_loci),
+          sprintf('linkage = "%s"', input$linkage))),
+      threshold = sprintf("gid_method_threshold,\n                     %s",
+        a(sprintf("max_mismatch = %s", input$max_mismatch),
+          sprintf("min_loci = %s", input$min_loci),
+          sprintf('linkage = "%s"', input$linkage))),
+      genalex = sprintf("gid_method_genalex,\n                     %s",
+        a(sprintf("near_match_loci = %s", input$near_match),
+          sprintf("min_loci = %s", input$min_loci),
+          sprintf('linkage = "%s"', input$linkage))),
+      allelematch = sprintf("gid_method_allelematch,\n                     min_loci = %s",
+        input$min_loci),
+      exact = sprintf("gid_method_exact,\n                     %s",
+        a(sprintf("min_loci = %s", input$min_loci),
+          sprintf('linkage = "%s"', input$linkage))))
+  })
+
+  observeEvent(input$dl_script, {
+    req(input$id_col, length(loci()) > 0)
+    send_file("genoID_reproduce.R", sprintf(paste0(
       '## Reproduces exactly what the genoID app just did.\n',
       'source("genoID_core.R")\n\n',
       'raw  <- gid_read("%s")\n',
@@ -889,41 +1191,64 @@ server <- function(input, output, session) {
       'gt   <- gid_matrix(raw, "%s", loci)\n',
       'f    <- gid_filter(gt, min_locus_call = %s, min_sample_call = %s)\n',
       'grp  <- %s\n\n',
-      'res  <- gid_by_group(f$gt, grp, gid_method_lr,\n',
-      '                     dropout = %s, false_allele = %s,\n',
-      '                     kinship = "%s", post_cut = %s,\n',
-      '                     min_loci = %s, linkage = "%s")\n\n',
+      'res  <- gid_by_group(f$gt, grp, %s)\n\n',
       'write.csv(res$assignment, "individual_assignments.csv", row.names = FALSE)\n'),
       input$file$name %||% "genotypes.csv",
       paste0('"', paste(loci(), collapse = '", "'), '"'),
       input$id_col, input$min_locus_call, input$min_sample_call,
-      if (nzchar(input$group_col %||% "")) sprintf('raw[["%s"]][match(rownames(f$gt), raw[["%s"]])]',
-                                                   input$group_col, input$id_col)
+      if (nzchar(input$group_col %||% ""))
+        sprintf('raw[["%s"]][match(rownames(f$gt), raw[["%s"]])]',
+                input$group_col, input$id_col)
       else 'rep("all", nrow(f$gt))',
-      input$dropout, input$false_allele, input$kinship, input$post_cut,
-      input$min_loci, input$linkage), f))
+      method_call()), type = "text/plain;charset=utf-8")
+  })
 
-  output$dl_all <- downloadHandler(
-    filename = function() sprintf("genoID_results_%s.zip", format(Sys.Date())),
-    content = function(f) {
-      d <- tempfile(); dir.create(d)
-      r <- res()
-      write.csv(final_tbl(), file.path(d, "individual_assignments.csv"), row.names = FALSE)
-      write.csv(best()$pairs, file.path(d, "pairwise_comparisons.csv"), row.names = FALSE)
-      write.csv(r$cmp$summary, file.path(d, "method_comparison.csv"), row.names = FALSE)
-      write.csv(r$cmp$table, file.path(d, "assignments_all_methods.csv"), row.names = FALSE)
-      write.csv(pid(), file.path(d, "probability_of_identity.csv"), row.names = FALSE)
-      write.csv(gid_locus_stats(r$gt), file.path(d, "locus_qc.csv"), row.names = FALSE)
-      write.csv(power(), file.path(d, "sample_power.csv"), row.names = FALSE)
-      ic <- gid_individual_consensus(r$gt, best()$assignment)
-      write.csv(data.frame(individual = rownames(ic$genotypes), ic$genotypes),
-                file.path(d, "individual_genotypes.csv"), row.names = FALSE)
-      if (!is.null(best()$conflicts))
-        write.csv(best()$conflicts, file.path(d, "cluster_conflicts.csv"), row.names = FALSE)
+  ## The bundle. Zipping needs a compiled package and a writable filesystem,
+  ## neither guaranteed in the browser, so fall back to one concatenated text
+  ## file rather than failing.
+  observeEvent(input$dl_all, {
+    r <- try(res(), silent = TRUE)
+    if (inherits(r, "try-error") || is.null(r))
+      return(showNotification("Press Identify individuals first.", type = "warning"))
+    ic <- gid_individual_consensus(r$gt, best()$assignment)
+    parts <- list(
+      individual_assignments = final_tbl(),
+      pairwise_comparisons   = best()$pairs,
+      method_comparison      = r$cmp$summary,
+      assignments_all_methods = r$cmp$table,
+      probability_of_identity = pid(),
+      locus_qc               = gid_locus_stats(r$gt),
+      sample_power           = power(),
+      individual_genotypes   = data.frame(individual = rownames(ic$genotypes),
+                                          ic$genotypes))
+    if (!is.null(best()$conflicts)) parts$cluster_conflicts <- best()$conflicts
+
+    zipped <- try({
+      d <- file.path(tempdir(), paste0("genoID_", as.integer(Sys.time())))
+      dir.create(d, showWarnings = FALSE, recursive = TRUE)
+      for (nm in names(parts))
+        utils::write.csv(parts[[nm]], file.path(d, paste0(nm, ".csv")), row.names = FALSE)
       writeLines(params(), file.path(d, "settings.txt"))
-      if (requireNamespace("zip", quietly = TRUE)) zip::zip(f, list.files(d), root = d)
-      else utils::zip(f, file.path(d, list.files(d)), flags = "-j9X")
-    })
+      zf <- file.path(tempdir(), "genoID_results.zip")
+      unlink(zf)
+      zip::zip(zf, list.files(d), root = d)
+      gsub("[\r\n]", "", jsonlite::base64_enc(readBin(zf, "raw", file.size(zf))))
+    }, silent = TRUE)
+
+    if (!inherits(zipped, "try-error") && nzchar(zipped)) {
+      send_file(sprintf("genoID_results_%s.zip", format(Sys.Date())), zipped,
+                type = "application/zip", b64 = TRUE)
+    } else {
+      txt <- unlist(lapply(names(parts), function(nm)
+        c(paste0("##### ", nm, " #####"), as_csv(parts[[nm]]), "")))
+      txt <- c(txt, "##### settings #####", params())
+      send_file(sprintf("genoID_results_%s.txt", format(Sys.Date())),
+                paste(txt, collapse = "\n"), type = "text/plain;charset=utf-8")
+      showNotification(
+        "Your browser could not build a zip, so all results were combined into one text file.",
+        type = "message", duration = 8)
+    }
+  })
 }
 
 shinyApp(ui, server)

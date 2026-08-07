@@ -20,8 +20,8 @@ if your data are unpublished or covered by a data-sharing agreement.
 |---|---|
 | **Data & QC** | Call rates, minor allele frequencies, F<sub>IS</sub>, linkage (r²) between loci, and a checklist of the things that silently corrupt identity analyses — reversed allele order, duplicated sample IDs, quality-flagged cells, monomorphic loci |
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
-| **Individuals** | The answer, the evidence for every pair, and any cluster whose members do not all match each other |
-| **Method comparison** | All six methods on the same data, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
+| **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
+| **Method comparison** | All six methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
 | **Methods** | Plain-language description of every method followed by the actual statistical model and equations |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
@@ -128,12 +128,21 @@ Do **not** estimate the false-allele rate by scoring replicates against a
 consensus that required unanimous replicates to call a homozygote — that forces
 the estimate to exactly zero. The Methods page in the app explains why.
 
-## Nothing on the Individuals tab?
+## How the app is laid out
 
-Results are not computed until you press **Identify individuals** in the
-sidebar — the Data & QC and Panel power tabs fill in on their own, but the
-Individuals and Method comparison tabs wait for you. Both now say so, and if a
-run fails they show the actual R error rather than going blank.
+Pick a method at the top of the sidebar. The sidebar then shows **only that
+method's settings**, the Individuals tab reports **only that method's answer**,
+with a plain-language description and a button through to its full derivation
+and equations on the Methods tab.
+
+Every method still runs behind the scenes, so the **Method comparison** tab
+shows all six side by side whatever you picked. Switching method on the sidebar
+re-reports the Individuals tab instantly, without recomputing.
+
+Results are not computed until you press **Identify individuals** — the Data &
+QC and Panel power tabs fill in on their own, but Individuals and Method
+comparison wait for you. Both say so, and if a run fails they show the actual R
+error rather than going blank.
 
 ## Deploying your own copy
 
