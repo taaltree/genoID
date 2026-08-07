@@ -181,7 +181,8 @@ ui <- page_navbar(
       )
     ),
 
-    input_task_button("run", "Identify individuals", icon = icon("play")),
+    actionButton("run", "Identify individuals", icon = icon("play"),
+                 class = "btn-primary w-100"),
     tags$div(class = "gid-hint", style = "margin-top:.6rem",
              "Nothing leaves this machine unless you deploy the app to a server.")
   ),
@@ -233,6 +234,7 @@ ui <- page_navbar(
 
   nav_panel(
     "Individuals", icon = icon("fingerprint"),
+    uiOutput("run_status_ind"),
     uiOutput("power_warning"),
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
@@ -260,6 +262,7 @@ ui <- page_navbar(
 
   nav_panel(
     "Method comparison", icon = icon("code-compare"),
+    uiOutput("run_status_cmp"),
     card(card_header("How each method resolved the same data"), DTOutput("tbl_cmp")),
     layout_columns(
       col_widths = c(6, 6),
@@ -550,9 +553,12 @@ server <- function(input, output, session) {
                                           pid_cum = signif(pid_cum, 3), pid_sib_cum = signif(pid_sib_cum, 3))))
 
   ## ------------------------------------------------------------- run methods
+  run_error <- reactiveVal(NULL)
+
   res <- eventReactive(input$run, {
     p <- prep(); req(p, nrow(p$gt) >= 2)
-    withProgress(message = "Identifying individuals", value = 0, {
+    run_error(NULL)
+    out <- tryCatch(withProgress(message = "Identifying individuals", value = 0, {
       pr <- if (is.na(input$prior)) NULL else input$prior
       incProgress(0.15, detail = "probabilistic")
       lr <- gid_by_group(p$gt, p$grp, gid_method_lr, dropout = input$dropout,
@@ -594,7 +600,8 @@ server <- function(input, output, session) {
            cmp = gid_compare_methods(out), gt = p$gt, grp = p$grp,
            sweep = gid_threshold_sweep(p$gt, max_k = 6, min_loci = input$min_loci,
                                        linkage = input$linkage))
-    })
+    }), error = function(e) { run_error(conditionMessage(e)); NULL })
+    out
   })
 
   best <- reactive({ r <- res(); req(r); r$methods$probabilistic })
@@ -604,6 +611,26 @@ server <- function(input, output, session) {
   output$vb_recap <- renderText({
     s <- gid_summarise_assignment(best()$assignment); sprintf("%.0f%%", 100 * s$recapture_rate) })
   output$vb_max <- renderText({ max(table(best()$assignment$individual)) })
+
+  run_status <- function() {
+    if (!is.null(run_error()))
+      return(tags$div(class = "gid-flag", style = "margin-bottom:1rem",
+        tags$b("The analysis could not finish. "),
+        "R reported: ", tags$code(run_error()),
+        tags$div(style = "margin-top:.4rem",
+          "Common causes: too few loci surviving the call-rate filters, or a ",
+          "grouping column with a category containing a single sample. Adjust the ",
+          "settings in the sidebar and run again.")))
+    if (input$run == 0)
+      return(tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
+        tags$b("No results yet. "),
+        "Choose your sample ID column and loci in the sidebar, then press ",
+        tags$b("Identify individuals"), " to compute. Nothing on this tab is ",
+        "calculated until you do \u2014 the other tabs update on their own."))
+    NULL
+  }
+  output$run_status_ind <- renderUI(run_status())
+  output$run_status_cmp <- renderUI(run_status())
 
   output$power_warning <- renderUI({
     r <- res(); req(r)

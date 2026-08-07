@@ -96,7 +96,7 @@ cat(sprintf("largest true cluster: %d samples;  missing cells: %.1f%%\n",
             max(n_times), 100 * mean(as.matrix(df[, grep("^LOC", names(df))]) == "00")))
 
 ## ---- the demo must actually be recoverable, or it is a bad demo -----------
-suppressPackageStartupMessages(library(igraph))
+
 source("app/genoID_core.R")
 loci <- sprintf("LOC%02d", seq_len(N_LOCI))
 gt   <- gid_matrix(df, "SampleID", loci)

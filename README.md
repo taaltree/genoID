@@ -95,12 +95,13 @@ git clone https://github.com/taaltree/genoID.git
 cd genoID && Rscript -e "shiny::runApp('app', port = 4599)"
 ```
 
-Needs `shiny`, `bslib`, `DT`, `ggplot2`, `igraph`. `allelematch` is optional —
-without it that method falls back to a built-in equivalent instead of failing.
+Needs `shiny`, `bslib`, `DT`, `ggplot2`. `allelematch` is optional — without it
+that method falls back to a built-in equivalent instead of failing.
 
 ## Using the R functions directly
 
-`app/genoID_core.R` has no Shiny dependency and can be sourced on its own.
+`app/genoID_core.R` is **base R only** — no Shiny, no compiled packages, no
+dependencies at all. Source it anywhere.
 
 ```r
 source("app/genoID_core.R")
@@ -127,6 +128,13 @@ Do **not** estimate the false-allele rate by scoring replicates against a
 consensus that required unanimous replicates to call a homozygote — that forces
 the estimate to exactly zero. The Methods page in the app explains why.
 
+## Nothing on the Individuals tab?
+
+Results are not computed until you press **Identify individuals** in the
+sidebar — the Data & QC and Panel power tabs fill in on their own, but the
+Individuals and Method comparison tabs wait for you. Both now say so, and if a
+run fails they show the actual R error rather than going blank.
+
 ## Deploying your own copy
 
 Fork it, then enable **Settings → Pages → Source: GitHub Actions**. Every push
@@ -138,7 +146,7 @@ in `.github/workflows/deploy.yml`.
 ```
 app/
   app.R                  the Shiny app
-  genoID_core.R          all methods and statistics; no Shiny dependency
+  genoID_core.R          all methods and statistics; base R only, no dependencies
   methods_page.R         the Methods & mathematics tab
   demo/                  simulated example dataset
 run_analysis.R           batch pipeline, writes result CSVs and figures

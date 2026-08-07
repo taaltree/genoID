@@ -15,13 +15,12 @@
 ##   That is what makes the probabilistic method fast enough for a web app and
 ##   is also what makes it work unchanged for microsatellites.
 ##
-## Dependencies: base R + igraph (graph resolution). allelematch is optional
-## (Method 3 degrades gracefully to a built-in reimplementation if absent).
+## Dependencies: BASE R ONLY. allelematch is optional -- that method degrades
+## to a built-in equivalent if the package is absent. Keeping the core free of
+## compiled packages is what lets the whole thing run in a browser under
+## WebAssembly, and lets you source this file anywhere without installing
+## anything.
 ## ---------------------------------------------------------------------------
-
-suppressPackageStartupMessages({
-  library(igraph)
-})
 
 MISSING_CODES <- c("00", "0", "000", "NA", "N/A", "", "--", "-", "?", "00/00",
                    "0/0", "000000", "NN", "..", ".")
@@ -527,30 +526,81 @@ gid_pairwise <- function(enc, gt) {
 #'                       cliques, greedily assigned). Conservative, splits.
 #' Conflicts (open triangles) are always reported -- they are the single most
 #' useful diagnostic for whether the threshold is set sensibly.
+#' Connected components of a symmetric logical adjacency matrix. Base R, so the
+#' core has no compiled dependency and runs anywhere R does -- including inside
+#' a browser under WebAssembly.
+gid_components <- function(adj) {
+  n <- nrow(adj)
+  comp <- integer(n); k <- 0L
+  for (s in seq_len(n)) {
+    if (comp[s]) next
+    k <- k + 1L; stack <- s
+    while (length(stack)) {
+      v <- stack[length(stack)]; stack <- stack[-length(stack)]
+      if (comp[v]) next
+      comp[v] <- k
+      stack <- c(stack, which(adj[v, ] & comp == 0L))
+    }
+  }
+  comp
+}
+
+
+#' Maximal cliques among the vertices `vs`, by Bron-Kerbosch with pivoting.
+#' Called one connected component at a time, which keeps the search bounded --
+#' components in this setting are the recapture groups, so they are small.
+gid_max_cliques <- function(adj, vs) {
+  res <- list()
+  nbr <- lapply(vs, function(v) vs[adj[v, vs]])
+  names(nbr) <- as.character(vs)
+  nb <- function(v) nbr[[as.character(v)]]
+
+  bk <- function(R, P, X) {
+    if (!length(P) && !length(X)) { res[[length(res) + 1L]] <<- R; return(invisible(NULL)) }
+    PX  <- c(P, X)
+    piv <- PX[which.max(vapply(PX, function(u) length(intersect(P, nb(u))), 1L))]
+    for (v in setdiff(P, nb(piv))) {
+      bk(c(R, v), intersect(P, nb(v)), intersect(X, nb(v)))
+      P <- setdiff(P, v); X <- c(X, v)
+    }
+  }
+  bk(integer(0), vs, integer(0))
+  res
+}
+
+
 gid_resolve <- function(pairs_matched, all_ids, linkage = c("single", "complete")) {
   linkage <- match.arg(linkage)
-  gph <- igraph::make_empty_graph(n = length(all_ids), directed = FALSE)
-  igraph::V(gph)$name <- all_ids
-  if (nrow(pairs_matched))
-    gph <- igraph::add_edges(gph, as.vector(rbind(
-      match(pairs_matched$id1, all_ids), match(pairs_matched$id2, all_ids))))
-  gph <- igraph::simplify(gph)
+  n <- length(all_ids)
+  adj <- matrix(FALSE, n, n)
 
-  comp <- igraph::components(gph)$membership
-  # open triangles = evidence that the match rule is too loose (or too tight)
+  if (!is.null(pairs_matched) && nrow(pairs_matched)) {
+    a <- match(pairs_matched$id1, all_ids)
+    b <- match(pairs_matched$id2, all_ids)
+    ok <- !is.na(a) & !is.na(b) & a != b
+    if (any(ok)) {
+      adj[cbind(a[ok], b[ok])] <- TRUE
+      adj[cbind(b[ok], a[ok])] <- TRUE
+    }
+  }
+
+  comp <- gid_components(adj)
+
+  # A cluster whose members do not all match each other is being held together
+  # by a chain of intermediate samples, and may be two animals.
   n_conflict <- 0L; conflicts <- list()
   for (cid in unique(comp)) {
     v <- which(comp == cid)
     if (length(v) < 3) next
-    sub <- igraph::induced_subgraph(gph, v)
-    dens <- igraph::gsize(sub) / choose(length(v), 2)
+    n_edge <- sum(adj[v, v]) / 2
+    dens <- n_edge / choose(length(v), 2)
     if (dens < 1) {
       n_conflict <- n_conflict + 1L
       conflicts[[length(conflicts) + 1L]] <- data.frame(
         component = cid, n_samples = length(v),
-        n_edges = igraph::gsize(sub), n_possible = choose(length(v), 2),
+        n_edges = n_edge, n_possible = choose(length(v), 2),
         completeness = dens,
-        members = paste(igraph::V(sub)$name, collapse = ", "),
+        members = paste(all_ids[v], collapse = ", "),
         stringsAsFactors = FALSE)
     }
   }
@@ -558,16 +608,20 @@ gid_resolve <- function(pairs_matched, all_ids, linkage = c("single", "complete"
   if (linkage == "single") {
     memb <- comp
   } else {
-    # greedy maximal cliques, largest first
-    memb <- rep(NA_integer_, length(all_ids)); k <- 0L
-    cl <- igraph::max_cliques(gph, min = 1)
+    # greedy maximal cliques, largest first, within each component
+    memb <- rep(NA_integer_, n); k <- 0L
+    cl <- unlist(lapply(unique(comp), function(cid) {
+      v <- which(comp == cid)
+      if (length(v) == 1L) list(v) else gid_max_cliques(adj, v)
+    }), recursive = FALSE)
     cl <- cl[order(-vapply(cl, length, 1L))]
     for (cq in cl) {
       v <- as.integer(cq); v <- v[is.na(memb[v])]
       if (!length(v)) next
       k <- k + 1L; memb[v] <- k
     }
-    memb[is.na(memb)] <- seq.int(k + 1L, length.out = sum(is.na(memb)))
+    lone <- which(is.na(memb))
+    if (length(lone)) memb[lone] <- seq.int(k + 1L, length.out = length(lone))
   }
 
   ind <- sprintf("IND_%03d", as.integer(factor(memb, levels = unique(memb[order(memb)]))))
@@ -576,7 +630,7 @@ gid_resolve <- function(pairs_matched, all_ids, linkage = c("single", "complete"
   # silently drop attributes and the conflict count would read as zero
   list(assignment = asg,
        conflicts = if (length(conflicts)) do.call(rbind, conflicts) else NULL,
-       n_conflict = n_conflict, graph = gph)
+       n_conflict = n_conflict, adjacency = adj)
 }
 
 

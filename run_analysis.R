@@ -14,7 +14,7 @@
 ## ---------------------------------------------------------------------------
 
 suppressPackageStartupMessages({
-  library(igraph); library(readxl); library(ggplot2)
+  library(readxl); library(ggplot2)
 })
 source("app/genoID_core.R")
 
