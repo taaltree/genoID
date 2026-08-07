@@ -1,13 +1,14 @@
 ## run_analysis.R ------------------------------------------------------------
 ##
 ## Collapse the AITRC July 2026 consensus genotypes into unique individuals
-## using four independent methods, and compare them.
+## using six independent methods, and compare them.
 ##
 ##   Method 1  exact match                (baseline; no error tolerance)
 ##   Method 2  mismatch threshold + sweep (Paetkau-style; the field standard)
 ##   Method 3  GenAlEx Matches            (Peakall & Smouse; what many labs run)
 ##   Method 4  allelematch                (Galpern et al. 2012; semi-automated)
-##   Method 5  likelihood ratio           (probabilistic; recommended)
+##   Method 5  Sethi et al. (2016)        (likelihood vs the best competing relationship)
+##   Method 6  likelihood ratio           (probabilistic; recommended)
 ##
 ## Run from the genoID/ directory:  Rscript run_analysis.R
 ## ---------------------------------------------------------------------------
@@ -260,7 +261,19 @@ if (!is.null(am$profile) && is.data.frame(am$profile)) {
 say("allelematch flagged %s samples as unclassified or multiple-match",
     length(am$unclassified %||% character(0)))
 
-say("--- Method 5: likelihood ratio ---")
+say("--- Method 5: Sethi et al. (2016) error-tolerant match calling ---")
+msethi <- gid_by_group(gt_all, species, gid_method_sethi,
+                       dropout = D_CONS, false_allele = F_CONS,
+                       relationships = c("unrelated", "full_sib", "parent_offspring"),
+                       lambda_cut = 1, min_loci = MIN_LOCI)
+say("Sethi: %d individuals; best competing relationship for matched pairs: %s",
+    length(unique(msethi$assignment$individual)),
+    paste(sprintf("%s=%d", names(table(msethi$matched_pairs$best_alternative)),
+                  table(msethi$matched_pairs$best_alternative)), collapse = " "))
+tsv(msethi$matched_pairs[, c("id1", "id2", "n_compared", "log10_lambda",
+                             "best_alternative")], "sethi_matched_pairs.csv")
+
+say("--- Method 6: likelihood ratio ---")
 m4 <- gid_by_group(gt_all, species, gid_method_lr, freqs = NULL,
                    dropout = D_CONS, false_allele = F_CONS,
                    kinship = "full_sib", post_cut = 0.999, min_loci = MIN_LOCI)
@@ -269,7 +282,7 @@ m4u <- gid_by_group(gt_all, species, gid_method_lr, freqs = NULL,
                     kinship = "unrelated", post_cut = 0.999, min_loci = MIN_LOCI)
 
 results <- list(exact = m1, threshold = m2, genalex = mgx, allelematch = m3,
-                LR_fullsib = m4, LR_unrelated = m4u)
+                sethi = msethi, LR_fullsib = m4, LR_unrelated = m4u)
 
 ## ===========================================================================
 ## 7. COMPARISON

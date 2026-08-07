@@ -2,7 +2,7 @@
 
 **Turn consensus multilocus genotypes into unique individuals — in your browser.**
 
-Upload a genotype table, get a list of animals. Five methods run side by side so
+Upload a genotype table, get a list of animals. Six methods run side by side so
 you can see whether your answer is a property of the data or of the settings you
 chose. Species-agnostic: SNPs or microsatellites, any panel, any organism.
 
@@ -21,13 +21,13 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Data & QC** | Call rates, minor allele frequencies, F<sub>IS</sub>, linkage (r²) between loci, and a checklist of the things that silently corrupt identity analyses — reversed allele order, duplicated sample IDs, quality-flagged cells, monomorphic loci |
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | The answer, the evidence for every pair, and any cluster whose members do not all match each other |
-| **Method comparison** | All five methods on the same data, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
+| **Method comparison** | All six methods on the same data, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
 | **Methods** | Plain-language description of every method followed by the actual statistical model and equations |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
 
-## The five methods
+## The six methods
 
 | Method | What it does | Use it for |
 |---|---|---|
@@ -36,11 +36,19 @@ and an R script that reproduces it.
 | **GenAlEx Matches** | Reproduces GenAlEx's Multilocus → Matches: match distribution, near-match list, P(ID) / P(ID)<sub>sib</sub> | Continuity with what your lab already runs |
 | **allelematch** | Galpern et al. (2012), with its own automatic threshold selection | Independent published check |
 | **Likelihood ratio** | Explicit dropout / false-allele error model, tested against a stated alternative (unrelated, half sib, full sib, parent–offspring), returning a posterior probability per pair | **Recommended** |
+| **Sethi et al. (2016)** | Same likelihood, but divided by whichever relationship best explains the pair — so you don't pick one — and decided on evidence alone (Λ > 1) | **Recommended** |
 
-The likelihood ratio is the only one that attaches a number to each match rather
-than a yes/no, and the only one that lets you say what "a different animal"
-means. For pack-, pride-, or colony-living species that choice is usually worth
-more than any threshold you can tune.
+The last two are the ones to report. Both attach a number to every pair instead
+of a yes/no, and both make the alternative hypothesis explicit — which, for
+pack-, pride-, or colony-living species, matters more than any threshold you can
+tune.
+
+They differ in one place: **the decision rule**. Sethi et al. accept a match
+whenever it is more likely than the best competing relationship (Λ > 1), which
+needs no prior but takes no account of how many pairs you tested. The likelihood
+ratio method converts evidence to a posterior using a prior estimated from the
+data, which is stricter on large datasets. Run both and report the range they
+bracket — on the AITRC wolf dataset that is 59 to 63 animals.
 
 ## Try it without your own data
 
@@ -55,9 +63,11 @@ so you can score any method against it:
 | GenAlEx Matches | 47 | 0.22 |
 | Mismatch threshold | 35 | 0.86 |
 | allelematch | 31 | 0.95 |
-| **Likelihood ratio** | **30** | **0.98** |
+| Likelihood ratio | 30 | 0.98 |
+| **Sethi et al. (2016)** | **28** | **1.00** |
 
-That is what genotyping error does to methods that only count differences.
+Sethi et al. recovers the truth exactly. That gap — 47 animals versus 28 — is
+what a 3% dropout rate does to methods that only count differences.
 
 ## Your data format
 
@@ -133,7 +143,7 @@ app/
   demo/                  simulated example dataset
 run_analysis.R           batch pipeline, writes result CSVs and figures
 make_demo_data.R         regenerates the example (and checks it is recoverable)
-report/                  written report for the AITRC wolf/coyote dataset
+report/                  written report (not committed; see .gitignore)
 ```
 
 No real genotype data is committed to this repository.
@@ -142,8 +152,8 @@ No real genotype data is committed to this repository.
 
 Broquet & Petit (2004) *Mol Ecol* 13:3601 · Galpern et al. (2012) *Mol Ecol Res*
 12:771 · Paetkau (2003) *Mol Ecol* 12:1375 · Peakall & Smouse (2006, 2012) ·
-Taberlet et al. (1996) *NAR* 24:3189 · Waits, Luikart & Taberlet (2001)
-*Mol Ecol* 10:249
+Sethi et al. (2016) *R Soc Open Sci* 3:160457 · Taberlet et al. (1996) *NAR*
+24:3189 · Waits, Luikart & Taberlet (2001) *Mol Ecol* 10:249
 
 ## License
 

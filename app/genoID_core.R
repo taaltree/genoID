@@ -981,6 +981,27 @@ gid_pair_prob <- function(p, dict, k) {
 }
 
 
+#' Per-locus log10 likelihood of an observed genotype pair under each
+#' hypothesis separately: same individual, and each relatedness state.
+#'
+#' Kept separate (rather than pre-divided into a ratio) so that the denominator
+#' can be chosen after summing across loci -- which is what Sethi et al. (2016)
+#' require and what a single fixed alternative cannot do.
+gid_hypothesis_tables <- function(p, dict, dropout, false_allele,
+                                  relationships = c("unrelated", "full_sib",
+                                                    "parent_offspring")) {
+  if (!length(dict)) return(NULL)
+  E  <- gid_obs_matrix(dict, p, dropout, false_allele)
+  gp <- gid_geno_prob(p, dict)
+  out <- list(same_individual =
+                log10(pmax((E %*% diag(gp, nrow = length(gp))) %*% t(E), 1e-300)))
+  for (r in relationships)
+    out[[r]] <- log10(pmax(E %*% gid_pair_prob(p, dict, GID_KINSHIP[[r]]) %*% t(E),
+                           1e-300))
+  out
+}
+
+
 #' Per-locus G x G matrix of log10 LR (same individual vs H0).
 gid_lr_table <- function(p, dict, dropout, false_allele, k) {
   if (!length(dict)) return(matrix(0, 0, 0))
@@ -1090,6 +1111,92 @@ gid_sample_power <- function(gt, pid_tab) {
                pid = v[["pid"]], pid_sib = v[["pid_sib"]],
                stringsAsFactors = FALSE)
   }))
+}
+
+
+# =============================================================================
+# 9b. METHOD -- SETHI ET AL. (2016) ERROR-TOLERANT MATCH CALLING
+# =============================================================================
+#
+# Same likelihood machinery as gid_method_lr(), but two deliberate differences
+# that come straight from the paper:
+#
+#   1. The denominator is the BEST non-match explanation rather than one the
+#      user picked. Sethi et al. define
+#
+#         Lambda = L(same individual) / max{ L(unrelated), L(full sib), L(parent-offspring) }
+#
+#      taken over the whole multilocus genotype, not locus by locus. A pair is
+#      only called a match if it beats every competing relationship, which
+#      removes the awkward "which alternative do I assume?" decision and is
+#      conservative in the right direction.
+#
+#   2. The decision rule is Lambda > 1 -- pure strength of evidence, no prior
+#      and no posterior. Simpler and assumption-free, but it does not scale
+#      with how many pairs you are testing, so on a large dataset it will make
+#      more false matches than a posterior rule. Both are offered.
+#
+# Their clustering step (compare each sample to all others, merge on a match,
+# repeat until memberships stop changing) is exactly connected components of
+# the match graph, which is what linkage = "single" does here.
+#
+# Sethi, S.A. et al. (2016) R. Soc. open sci. 3:160457.
+
+gid_method_sethi <- function(gt, freqs = NULL, enc = NULL,
+                             dropout = 0.02, false_allele = 0.005,
+                             relationships = c("unrelated", "full_sib",
+                                               "parent_offspring"),
+                             lambda_cut = 1, min_loci = 15,
+                             linkage = "single", weights = NULL) {
+  if (is.null(enc))   enc   <- gid_encode(gt)
+  if (is.null(freqs)) freqs <- gid_allele_freq(gt, weights)
+  loci <- colnames(gt)
+  d <- if (length(dropout) == 1) setNames(rep(dropout, length(loci)), loci) else dropout
+  f <- if (length(false_allele) == 1) setNames(rep(false_allele, length(loci)), loci) else false_allele
+
+  tabs <- lapply(loci, function(L)
+    gid_hypothesis_tables(freqs[[L]], enc$dict[[L]], d[[L]], f[[L]], relationships))
+  names(tabs) <- loci
+
+  code <- enc$code; n <- nrow(code)
+  ij <- which(upper.tri(matrix(0, n, n)), arr.ind = TRUE)
+  i <- ij[, 1]; j <- ij[, 2]
+  hyp <- c("same_individual", relationships)
+  ll  <- matrix(0, length(i), length(hyp), dimnames = list(NULL, hyp))
+  n_cmp <- integer(length(i))
+
+  for (L in loci) {
+    tb <- tabs[[L]]
+    if (is.null(tb)) next
+    a <- code[i, L]; b <- code[j, L]
+    both <- a > 0 & b > 0
+    if (!any(both)) next
+    n_cmp <- n_cmp + both
+    idx <- cbind(a[both], b[both])
+    for (h in hyp) ll[both, h] <- ll[both, h] + tb[[h]][idx]
+  }
+
+  best_alt_ll   <- apply(ll[, relationships, drop = FALSE], 1, max)
+  best_alt_name <- relationships[max.col(ll[, relationships, drop = FALSE], "first")]
+  log10_lambda  <- ll[, "same_individual"] - best_alt_ll
+
+  pr <- data.frame(i = i, j = j, id1 = rownames(gt)[i], id2 = rownames(gt)[j],
+                   n_compared = n_cmp, log10_lambda = log10_lambda,
+                   best_alternative = best_alt_name,
+                   stringsAsFactors = FALSE)
+  pr <- cbind(pr, setNames(as.data.frame(ll), paste0("logL_", hyp)))
+
+  m  <- pr[pr$n_compared >= min_loci & pr$log10_lambda > log10(lambda_cut), , drop = FALSE]
+  rs <- gid_resolve(m, rownames(gt), linkage)
+
+  list(method = "sethi", assignment = rs$assignment, conflicts = rs$conflicts,
+       n_conflict = rs$n_conflict, matched_pairs = m, pairs = pr,
+       max_log10_lambda_observed =
+         if (nrow(pr)) max(pr$log10_lambda[pr$n_compared >= min_loci], -Inf) else NA,
+       alt_used = table(m$best_alternative),
+       settings = list(dropout = mean(d), false_allele = mean(f),
+                       relationships = relationships, lambda_cut = lambda_cut,
+                       min_loci = min_loci, linkage = linkage))
 }
 
 

@@ -133,6 +133,23 @@ ui <- page_navbar(
       ),
 
       accordion_panel(
+        "Sethi et al. (2016)", value = "sethi", icon = icon("scale-balanced"),
+        checkboxInput("run_sethi", "Run error-tolerant match calling", TRUE),
+        checkboxGroupInput("sethi_rel", "Competing relationships",
+                           choices = c("Unrelated" = "unrelated",
+                                       "Full siblings" = "full_sib",
+                                       "Parent-offspring" = "parent_offspring",
+                                       "Half siblings" = "half_sib"),
+                           selected = c("unrelated", "full_sib", "parent_offspring")),
+        hint("This method divides by whichever of these best explains the pair, so you ",
+             "do not have to pick one. A match must beat every relationship on the list."),
+        numericInput("lambda_cut", "Accept a match when \u039b exceeds", 1, 0.01, 1e6, 1),
+        hint("The paper uses \u039b > 1: the match hypothesis simply has to be more likely ",
+             "than the best alternative. That is assumption-free but takes no account of how ",
+             "many pairs you are testing, so raise it on large datasets.")
+      ),
+
+      accordion_panel(
         "Shared settings", value = "shared", icon = icon("sliders"),
         numericInput("min_loci", "Minimum loci compared per pair", 15, 1, 500, 1),
         numericInput("min_sample_call", "Minimum sample call rate", 0.5, 0, 1, 0.05),
@@ -248,6 +265,12 @@ ui <- page_navbar(
            hint("A flat stretch means the answer is robust. A steady slide means the ",
                 "threshold, not the data, is deciding how many animals you have."))
     ),
+    conditionalPanel("input.run_sethi == true",
+      card(card_header("Sethi et al. \u2014 which relationship competed?"),
+        hint("For every pair called a match, the alternative hypothesis that came closest. ",
+             "If one relationship dominates, that is the null your other analyses should ",
+             "be using too."),
+        uiOutput("sethi_alt"))),
     conditionalPanel("input.run_genalex == true",
       card(card_header("GenAlEx Matches output"),
         hint("The same three things GenAlEx's Multilocus \u2192 Matches routine reports: ",
@@ -538,6 +561,14 @@ server <- function(input, output, session) {
                          max_mismatch = input$max_mismatch, min_loci = input$min_loci,
                          linkage = input$linkage)
       out <- list(exact = ex, threshold = th, probabilistic = lr)
+      if (isTRUE(input$run_sethi) && length(input$sethi_rel)) {
+        incProgress(0.15, detail = "Sethi et al. match calling")
+        out$sethi <- gid_by_group(p$gt, p$grp, gid_method_sethi,
+                                  dropout = input$dropout, false_allele = input$false_allele,
+                                  relationships = input$sethi_rel,
+                                  lambda_cut = input$lambda_cut,
+                                  min_loci = input$min_loci, linkage = input$linkage)
+      }
       if (isTRUE(input$run_genalex)) {
         incProgress(0.1, detail = "GenAlEx Matches")
         out$genalex <- gid_by_group(p$gt, p$grp, gid_method_genalex,
@@ -552,7 +583,7 @@ server <- function(input, output, session) {
         if (inherits(out$allelematch, "try-error")) out$allelematch <- NULL
       }
       incProgress(0.1, detail = "comparing")
-      ord <- c("exact", "threshold", "genalex", "allelematch", "probabilistic")
+      ord <- c("exact", "threshold", "genalex", "allelematch", "sethi", "probabilistic")
       list(methods = out[ord[ord %in% names(out)]],
            cmp = gid_compare_methods(out), gt = p$gt, grp = p$grp,
            sweep = gid_threshold_sweep(p$gt, max_k = 6, min_loci = input$min_loci,
@@ -679,6 +710,26 @@ server <- function(input, output, session) {
     }))
   })
 
+  output$sethi_alt <- renderUI({
+    r <- res(); req(r); st <- r$methods$sethi; req(st)
+    mp <- st$matched_pairs
+    if (is.null(mp) || !nrow(mp))
+      return(tags$p(class = "gid-hint", "No pairs met the threshold."))
+    tb <- sort(table(mp$best_alternative), decreasing = TRUE)
+    mx <- vapply(st$by_group, function(e) e$max_log10_lambda_observed %||% NA_real_, 0)
+    tagList(
+      tags$div(style = "display:flex;gap:1.4rem;flex-wrap:wrap;margin:.3rem 0 .7rem",
+        lapply(names(tb), function(k) tags$div(
+          tags$div(style = "font-family:var(--mono);font-size:1.35rem;color:#1d3557", tb[[k]]),
+          tags$div(class = "gid-hint", style = "margin:0", gsub("_", " ", k))))),
+      tags$p(class = "gid-hint",
+        sprintf("%d pairs called as matches. Strongest evidence in the data: log10 \u039b = %.2f.",
+                nrow(mp), max(mx, na.rm = TRUE)),
+        if (length(tb) == 1) sprintf(
+          " Every matched pair was hardest to distinguish from %s, so that is the alternative worth reporting.",
+          gsub("_", " ", names(tb)[1])) else ""))
+  })
+
   output$plot_sweep <- renderPlot({
     s <- res()$sweep
     ggplot(s, aes(max_mismatch, n_individuals)) +
@@ -761,6 +812,7 @@ server <- function(input, output, session) {
       "  cluster rule       %s\n",
       "\nGut-check methods\n",
       "  mismatch threshold %d loci\n",
+      "  Sethi et al. 2016  %s\n",
       "  GenAlEx Matches    %s\n",
       "  allelematch        %s\n",
       "\nResult: %d samples -> %d individuals\n"),
@@ -771,6 +823,9 @@ server <- function(input, output, session) {
       input$kinship, input$post_cut, input$dropout, input$false_allele,
       if (is.na(input$prior)) "estimated from data" else as.character(input$prior),
       input$min_loci, input$linkage, input$max_mismatch,
+      if (isTRUE(input$run_sethi))
+        sprintf("run, lambda > %s vs {%s}", input$lambda_cut,
+                paste(input$sethi_rel, collapse = ", ")) else "not run",
       if (isTRUE(input$run_genalex))
         sprintf("run, near matches within %d loci", input$near_match) else "not run",
       if (isTRUE(input$run_am)) "run" else "not run",

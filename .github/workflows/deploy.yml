@@ -48,7 +48,8 @@ jobs:
 
       - name: Export app to WebAssembly
         run: |
-          shinylive::export("app", "_site")
+          shinylive::export("app", "_site",
+                            template_params = list(title = "genoID"))
         shell: Rscript {0}
 
       - uses: actions/upload-pages-artifact@v3
