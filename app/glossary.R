@@ -122,6 +122,27 @@ GID_GLOSSARY <- list(
   logL_full_sib = list("log-likelihood: full sibs", "Log-likelihood of the pair under two full siblings."),
   logL_parent_offspring = list("log-likelihood: parent-offspring", "Log-likelihood of the pair under a parent and its offspring."),
 
+  # ---- sample map and confidence -------------------------------------------
+  n_in_individual = list("Samples of this animal",
+    "How many samples in total were assigned to the same animal as this one."),
+  held_by = list("Directly matched",
+    "How many of the other samples of this animal this sample matched outright, out of how many there are. \"1 of 8\" means it is held in by a single link and everything else is inferred through intermediates - worth checking. Blank for animals seen only once."),
+  linked_to = list("Directly matched",
+    "How many of the other samples assigned to this animal this sample matched outright. Below the full count means it is held in through an intermediate sample rather than on its own evidence."),
+  support = list("Support",
+    "The weakest link holding this sample inside its own animal: the lowest probability among its matches to the other samples of that animal. A sample joined through one marginal pair is far less secure than one that matches every other member outright. Singletons get 1, since nothing is holding them anywhere."),
+  rival = list("Nearest rival",
+    "The strongest link from this sample to a sample assigned to a DIFFERENT animal. High means it nearly matched something else."),
+  rival_sample = list("Rival sample",
+    "Which sample it nearly matched instead. This is the pair to compare by hand."),
+  rival_individual = list("Rival animal", "Which animal that rival belongs to."),
+  margin = list("Margin",
+    "Support minus nearest rival: how much better this sample's own animal explains it than the runner-up. A wide margin means the assignment survives any reasonable cutoff. Near zero means this sample is the reason your answer depends on where you drew the line."),
+  status = list("Status",
+    "Confident: wide margin, matches every other member of its animal. Check: narrow margin, or held in through an intermediate sample. Uncertain: the margin is small enough that a slightly different cutoff would reassign it. Underpowered: too few loci to resolve either way, so this is not a borderline call but no call at all."),
+  weakest_margin = list("Weakest margin",
+    "The smallest margin among the samples making up this animal - how secure the animal is overall."),
+
   # ---- threshold calibration -----------------------------------------------
   cutoff = list("Posterior cutoff",
     "The probability required before a pair is accepted as the same animal."),

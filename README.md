@@ -21,6 +21,7 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Data & QC** | Call rates, minor allele frequencies, F<sub>IS</sub>, linkage (r²) between loci, and a checklist of the things that silently corrupt identity analyses — reversed allele order, duplicated sample IDs, quality-flagged cells, monomorphic loci |
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
+| **Sample map** | Which animal each sample belongs to, with a confidence measure per sample: how firmly it is held in its own cluster, what it nearly matched instead, and whether the assignment would survive a different cutoff. Downloadable as your capture history |
 | **Method comparison** | All six methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
 | **Methods** | Notation, a worked example carried through all six methods, the statistical model behind each one, and a glossary defining every column the app can show you |
 
@@ -255,6 +256,35 @@ all replicates agree, no replicate can ever be seen disagreeing with a
 homozygous consensus, and the false-allele rate is forced to **exactly zero**.
 On this dataset that estimator returns 0.00% where maximum likelihood, given the
 same replicates, returns 1.5%.
+
+## Linking samples to individuals, with confidence
+
+The **Sample map** tab is the output most people actually need: one row per
+sample, the animal it belongs to, and how much to trust that. For each sample it
+asks two questions and reports the gap between them.
+
+| Column | Means |
+|---|---|
+| **Support** | The *weakest* link holding this sample inside its own animal. A sample joined through one marginal pair is far less secure than one matching every other member outright. Singletons get 1 |
+| **Nearest rival** | The *strongest* link to a sample assigned to a **different** animal — what it nearly matched instead |
+| **Margin** | Support − rival. Wide means the assignment survives any reasonable cutoff; near zero means this sample is the reason your answer depends on where you drew the line |
+| **Directly matched** | `1 of 8` means it is held into an 8-mate cluster by a single link, everything else inferred through intermediates |
+| **Status** | Confident · Check · Uncertain · Underpowered |
+
+`Underpowered` is deliberately separate: a sample with too few loci to resolve
+either way isn't a borderline call, it's **no call**, and treating it as
+borderline hides the real problem.
+
+On the AITRC data 13 of 104 samples are flagged — and they are exactly the
+samples the six methods disagreed about, arrived at independently. The worst
+sits at posterior 0.9989 against a five-sample individual, just under the 0.999
+cutoff: one sample, one thousandth of a probability, and a whole animal either
+appears or does not.
+
+It works for every method: the likelihood methods are scored on the posterior
+scale, the counting methods on mismatching loci. allelematch never exposes a
+per-pair score, so it borrows the mismatch counts, which are a property of the
+data rather than of any method.
 
 ## Every sample coming back as a unique individual?
 

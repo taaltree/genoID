@@ -1508,6 +1508,143 @@ gid_calibrate_threshold <- function(pairs, ids, min_loci = 15, linkage = "single
 }
 
 
+#' How safe is each sample's assignment?
+#'
+#' A list of individuals is only as trustworthy as its shakiest sample, and the
+#' shakiness is not evenly spread. For every sample this asks two questions:
+#'
+#'   support  -- the WEAKEST link holding it inside its own cluster. A sample
+#'               joined to its animal through one marginal pair is far less
+#'               secure than one that matches every other member outright.
+#'   rival    -- the STRONGEST link to a sample assigned to a different animal.
+#'               If a sample nearly matched something else, you want to know.
+#'
+#' The gap between them is the margin. A wide margin means the assignment would
+#' survive a different cutoff; a narrow one means this sample is the reason your
+#' answer depends on where you drew the line. Singletons are handled the same
+#' way, with support taken as 1: their margin is simply how far their best
+#' candidate fell short.
+#'
+#' Works for any method. Methods that return posteriors are scored on that
+#' scale; the rest fall back to counting mismatching loci, which is the only
+#' evidence they produce.
+gid_sample_confidence <- function(result, gt = NULL, pid_tab = NULL,
+                                  post_cut = 0.999, min_loci = 15) {
+
+  ## grouped results: do each block, then stack
+  if (!is.null(result$by_group)) {
+    sc <- NA_character_
+    out <- lapply(names(result$by_group), function(g) {
+      r <- result$by_group[[g]]
+      if (is.null(r$pairs)) return(NULL)
+      ids <- r$assignment$sample
+      d <- gid_sample_confidence(r, gt = if (is.null(gt)) NULL else gt[ids, , drop = FALSE],
+                                 pid_tab = pid_tab, post_cut = post_cut,
+                                 min_loci = min_loci)
+      if (is.null(d)) return(NULL)
+      sc <<- attr(d, "scale")
+      d$individual <- paste0(g, "_", d$individual)
+      cbind(group = g, d)
+    })
+    out <- out[!vapply(out, is.null, TRUE)]
+    if (!length(out)) return(NULL)
+    all <- do.call(rbind, out)
+    all <- all[order(all$status, all$margin, all$individual), ]
+    attr(all, "scale") <- sc
+    return(all)
+  }
+
+  asg <- result$assignment; pr <- result$pairs
+  if (is.null(asg) || is.null(pr) || !nrow(pr)) return(NULL)
+  ids <- asg$sample; n <- length(ids)
+
+  ## evidence on whatever scale this method produces
+  if (!is.null(pr$posterior_same)) {
+    score <- pr$posterior_same; scale <- "posterior"; cut <- post_cut
+  } else if (!is.null(pr$log10_lambda)) {
+    score <- 1 / (1 + 10^(-pr$log10_lambda)); scale <- "lambda"; cut <- 0.5
+  } else {
+    ## mismatch-based methods: rescale so higher is always more similar
+    mx <- max(pr$n_mismatch, 1)
+    score <- 1 - pr$n_mismatch / mx; scale <- "mismatch"; cut <- NA_real_
+  }
+
+  S <- matrix(NA_real_, n, n)
+  ii <- match(pr$id1, ids); jj <- match(pr$id2, ids)
+  ok <- !is.na(ii) & !is.na(jj) & pr$n_compared >= min_loci
+  S[cbind(ii[ok], jj[ok])] <- score[ok]
+  S[cbind(jj[ok], ii[ok])] <- score[ok]
+
+  matched <- matrix(FALSE, n, n)
+  m <- result$matched_pairs
+  if (!is.null(m) && nrow(m)) {
+    a <- match(m$id1, ids); b <- match(m$id2, ids)
+    g <- !is.na(a) & !is.na(b)
+    matched[cbind(a[g], b[g])] <- TRUE; matched[cbind(b[g], a[g])] <- TRUE
+  }
+
+  ind <- asg$individual
+  same <- outer(ind, ind, "==")
+  diag(same) <- FALSE
+
+  pick <- function(k, mask, f) {
+    v <- S[k, ][mask[k, ]]
+    v <- v[!is.na(v)]
+    if (!length(v)) NA_real_ else f(v)
+  }
+
+  res <- do.call(rbind, lapply(seq_len(n), function(k) {
+    n_mates <- sum(same[k, ])
+    support <- if (n_mates == 0) 1 else pick(k, same, min)
+    rival   <- pick(k, !same, max)
+    rk      <- which(!same[k, ] & S[k, ] == rival)
+    rk      <- rk[!is.na(rk)][1]
+    data.frame(
+      sample = ids[k], individual = ind[k],
+      n_in_individual = n_mates + 1L,
+      linked_to = sum(matched[k, ] & same[k, ]),
+      support = support,
+      rival = rival,
+      rival_sample = if (length(rk) && !is.na(rk)) ids[rk] else NA_character_,
+      rival_individual = if (length(rk) && !is.na(rk)) ind[rk] else NA_character_,
+      stringsAsFactors = FALSE)
+  }))
+
+  res$margin <- res$support - ifelse(is.na(res$rival), 0, res$rival)
+  res$held_by <- ifelse(res$n_in_individual == 1, NA_character_,
+                        sprintf("%d of %d", res$linked_to, res$n_in_individual - 1L))
+
+  ## how much information this sample carries on its own
+  if (!is.null(gt)) {
+    res$n_loci <- rowSums(!is.na(gt))[match(res$sample, rownames(gt))]
+    if (!is.null(pid_tab)) {
+      pw <- gid_sample_power(gt, pid_tab)
+      res$pid_sib <- pw$pid_sib[match(res$sample, pw$sample)]
+    }
+  }
+
+  ## A sample is only as safe as the weaker of: how firmly it is held in, and
+  ## how far the nearest outsider is. Underpowered comes first, because a sample
+  ## that could never be resolved is not a borderline call, it is no call.
+  underpowered <- (!is.null(res$n_loci) & (res$n_loci %||% Inf) < min_loci) |
+                  ((res$pid_sib %||% 0) > 0.01)
+  ## Being linked to only some of your cluster-mates is normal in a big cluster
+  ## with any dropout at all, and flagging it every time buries the real cases.
+  ## Only escalate when a sample is held in by a genuine minority of its links.
+  frac <- ifelse(res$n_in_individual > 1,
+                 res$linked_to / pmax(res$n_in_individual - 1, 1), 1)
+  fragile <- res$n_in_individual > 2 & frac < 0.5
+  res$status <- ifelse(
+    underpowered, "Underpowered",
+    ifelse(is.na(res$margin) | res$margin < 0.01, "Uncertain",
+      ifelse(res$margin < 0.2 | fragile, "Check", "Confident")))
+  res$status <- factor(res$status,
+                       levels = c("Uncertain", "Check", "Underpowered", "Confident"))
+  attr(res, "scale") <- scale
+  res[order(res$status, res$margin, res$individual), ]
+}
+
+
 #' Per-sample power: how identifiable is this sample given only the loci it
 #' actually has? This is the honest answer to "can I trust a singleton?"
 gid_sample_power <- function(gt, pid_tab) {

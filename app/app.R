@@ -490,6 +490,37 @@ ui <- page_navbar(
   ),
 
   nav_panel(
+    "Sample map", icon = icon("sitemap"),
+    uiOutput("run_status_map"),
+    layout_columns(
+      fill = FALSE, col_widths = c(3, 3, 3, 3),
+      vbox("Individuals", "vb_map_ind", "paw", "primary", key = "n_individuals"),
+      vbox("Confident samples", "vb_map_ok", "circle-check", "light", key = "status"),
+      vbox("Worth checking", "vb_map_chk", "magnifying-glass", "light", key = "status"),
+      vbox("Uncertain", "vb_map_bad", "triangle-exclamation", "light", key = "status")
+    ),
+    card(card_header("Samples to look at before you report anything"),
+         hint("Every sample whose assignment would change under a slightly ",
+              "different cutoff, ordered worst first. The rival column names the ",
+              "sample it nearly matched instead \u2014 that is the comparison to ",
+              "make by hand."),
+         uiOutput("map_review_note"),
+         DTOutput("tbl_review")),
+    card(card_header("How securely each sample is placed"),
+         plotOutput("plot_margin", height = 330),
+         hint("Each point is a sample. Far right means the assignment survives ",
+              "any reasonable cutoff; near zero means this sample is the reason ",
+              "your answer depends on where you drew the line.")),
+    card(card_header("Every sample and the animal it belongs to"),
+         hint("The full map. Download it as your capture history."),
+         DTOutput("tbl_map")),
+    card(card_header("Roster: one row per animal"),
+         hint("The same information the other way round \u2014 each animal and ",
+              "the samples that make it up."),
+         DTOutput("tbl_roster"))
+  ),
+
+  nav_panel(
     "Method comparison", icon = icon("code-compare"),
     uiOutput("run_status_cmp"),
     card(card_header("How each method resolved the same data"), DTOutput("tbl_cmp")),
@@ -547,7 +578,7 @@ ui <- page_navbar(
                      icon = icon("download"), class = "btn-primary w-100"),
         actionButton("dl_cons", "Consensus genotype per individual",
                      icon = icon("download"), class = "btn-outline-primary w-100"),
-        actionButton("dl_pairs", "All pairwise comparisons",
+        actionButton("dl_map", "Sample map with confidence",
                      icon = icon("download"), class = "btn-outline-primary w-100")
       ),
       tags$hr(),
@@ -1287,6 +1318,100 @@ server <- function(input, output, session) {
           gsub("_", " ", names(tb)[1])) else ""))
   })
 
+  ## ---- sample -> individual map with per-sample confidence ----------------
+  conf <- reactive({
+    r <- res(); req(r); b <- best(); req(b)
+    ## allelematch clusters internally and never exposes a per-pair score, so
+    ## borrow the locus-mismatch counts, which are a property of the data.
+    if (is.null(b$pairs) ||
+        (!is.null(b$by_group) &&
+         all(vapply(b$by_group, function(e) is.null(e$pairs), TRUE)))) {
+      src <- r$methods$exact
+      b <- if (!is.null(b$by_group)) {
+        b$by_group <- Map(function(e, s) { e$pairs <- s$pairs; e },
+                          b$by_group, src$by_group[names(b$by_group)]); b
+      } else { b$pairs <- src$pairs; b }
+    }
+    gid_sample_confidence(b, gt = r$gt, pid_tab = pid(),
+                          post_cut = input$post_cut, min_loci = input$min_loci)
+  })
+
+  map_tbl <- reactive({
+    cf <- conf(); req(cf)
+    a <- best()$assignment
+    cf$sex <- if (!is.null(res()$df) && nzchar(input$group_col %||% "")) NULL else NULL
+    keep <- c("sample", "individual", "group", "n_in_individual", "held_by",
+              "n_loci", "support", "rival", "rival_sample", "rival_individual",
+              "margin", "status")
+    cf[, intersect(keep, names(cf)), drop = FALSE]
+  })
+
+  output$run_status_map <- renderUI(run_status())
+  output$vb_map_ind <- renderText({ length(unique(best()$assignment$individual)) })
+  output$vb_map_ok  <- renderText({ sum(conf()$status == "Confident") })
+  output$vb_map_chk <- renderText({ sum(conf()$status %in% c("Check", "Underpowered")) })
+  output$vb_map_bad <- renderText({ sum(conf()$status == "Uncertain") })
+
+  output$map_review_note <- renderUI({
+    cf <- conf(); req(cf)
+    n <- sum(cf$status != "Confident")
+    if (!n) return(tags$div(class = "gid-flag gid-ok",
+      tags$b("Nothing to review. "), "Every sample sits well clear of the cutoff, ",
+      "so no assignment here turns on where you drew the line."))
+    tags$div(class = "gid-flag",
+      tags$b(sprintf("%d of %d samples are worth a look. ", n, nrow(cf))),
+      "These are the ones whose assignment would change under a slightly ",
+      "different cutoff. Nothing here is necessarily wrong \u2014 it is where ",
+      "your answer is soft, and where a second line of evidence (collection date, ",
+      "location, sex, a repeat extraction) earns its keep.")
+  })
+
+  output$tbl_review <- renderDT({
+    x <- map_tbl(); x <- x[x$status != "Confident", , drop = FALSE]
+    if (!nrow(x)) return(dt(data.frame(
+      message = "No samples flagged: every assignment is clear of the cutoff.")))
+    x$support <- signif(x$support, 4); x$rival <- signif(x$rival, 4)
+    x$margin <- signif(x$margin, 3)
+    dt(x)
+  })
+
+  output$plot_margin <- renderPlot({
+    cf <- conf(); req(cf)
+    d <- cf[!is.na(cf$margin), ]
+    d$status <- factor(d$status, levels = c("Confident", "Check", "Underpowered", "Uncertain"))
+    ggplot(d, aes(pmax(margin, 1e-6), status, colour = status)) +
+      geom_jitter(height = 0.22, width = 0, size = 2.3, alpha = 0.8) +
+      scale_x_log10(labels = function(z) format(z, scientific = FALSE, drop0trailing = TRUE)) +
+      scale_colour_manual(values = c(Confident = "#4a7c59", Check = "#c9a227",
+                                     Underpowered = MUTED, Uncertain = ACCENT),
+                          guide = "none") +
+      labs(x = "Margin: how far this sample's own cluster beats its nearest rival",
+           y = NULL,
+           subtitle = "Log scale. Points near the left are assignments that hinge on the cutoff.") +
+      theme_gid()
+  })
+
+  output$tbl_map <- renderDT(dt(within(map_tbl(), {
+    support <- signif(support, 4); rival <- signif(rival, 4); margin <- signif(margin, 3)
+  })))
+
+  output$tbl_roster <- renderDT({
+    cf <- conf(); req(cf)
+    sp <- split(cf, cf$individual)
+    r <- do.call(rbind, lapply(names(sp), function(k) {
+      x <- sp[[k]]
+      data.frame(individual = k,
+                 group = if (!is.null(x$group)) x$group[1] else NA_character_,
+                 n_in_individual = nrow(x),
+                 weakest_margin = min(x$margin, na.rm = TRUE),
+                 status = as.character(x$status[which.min(x$margin)]),
+                 members = paste(x$sample, collapse = ", "),
+                 stringsAsFactors = FALSE)
+    }))
+    r$weakest_margin <- signif(r$weakest_margin, 3)
+    dt(r[order(-r$n_in_individual, r$weakest_margin), ])
+  })
+
   ## ---- posterior cutoff calibration ---------------------------------------
   calib <- reactive({
     r <- res(); req(r)
@@ -1508,6 +1633,7 @@ server <- function(input, output, session) {
 
   dl_button("dl_assign", "assignments",           function() final_tbl())
   dl_button("dl_pairs",  "pairwise",              function() best()$pairs)
+  dl_button("dl_map",    "sample_map",            function() map_tbl())
   dl_button("dl_cons",   "individual_genotypes",  function() {
     ic <- gid_individual_consensus(res()$gt, best()$assignment)
     data.frame(individual = rownames(ic$genotypes), ic$genotypes) })
@@ -1585,6 +1711,7 @@ server <- function(input, output, session) {
     ic <- gid_individual_consensus(r$gt, best()$assignment)
     parts <- list(
       individual_assignments = final_tbl(),
+      sample_map_confidence  = map_tbl(),
       pairwise_comparisons   = best()$pairs,
       method_comparison      = r$cmp$summary,
       assignments_all_methods = r$cmp$table,
