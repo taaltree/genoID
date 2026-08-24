@@ -44,6 +44,7 @@ jobs:
             any::bslib
             any::DT
             any::ggplot2
+            any::leaflet
 
       - name: Export app to WebAssembly
         run: |

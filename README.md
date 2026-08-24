@@ -22,20 +22,20 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
 | **Sample map** | Which animal each sample belongs to, with a confidence measure per sample: how firmly it is held in its own cluster, what it nearly matched instead, and whether the assignment would survive a different cutoff. Downloadable as your capture history |
-| **Method comparison** | All six methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
-| **Methods** | Notation, a worked example carried through all six methods, the statistical model behind each one, and a glossary defining every column the app can show you |
+| **Scat map** | Every sample plotted where it was collected, coloured by which animal it belongs to. Switch the colouring between methods to see which samples change hands, click a scat for its ID, its individual and its full genotype, and link an animal's samples with a spider plot or a convex hull |
+| **Method comparison** | All five methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
+| **Methods** | Notation, a worked example carried through all five methods, the statistical model behind each one, and a glossary defining every column the app can show you |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
 
-## The six methods
+## The five methods
 
 | Method | What it does | Use it for |
 |---|---|---|
 | **Exact match** | Identical at every co-typed locus | Baseline sanity check |
 | **Mismatch threshold** | Allow up to *k* differing loci; sweeps *k* to show how sensitive the answer is | The field standard (Paetkau 2003) |
 | **GenAlEx Matches** | Reproduces GenAlEx's Multilocus → Matches: match distribution, near-match list, P(ID) / P(ID)<sub>sib</sub> | Continuity with what your lab already runs |
-| **allelematch** | Galpern et al. (2012), with its own automatic threshold selection | Independent published check |
 | **Likelihood ratio** | Explicit dropout / false-allele error model, tested against a stated alternative (unrelated, half sib, full sib, parent–offspring), returning a posterior probability per pair | **Recommended** |
 | **Sethi et al. (2016)** | Same likelihood, but divided by whichever relationship best explains the pair — so you don't pick one — and decided on evidence alone (Λ > 1) | **Recommended** |
 
@@ -63,7 +63,6 @@ so you can score any method against it:
 | Exact match | 47 | 0.22 |
 | GenAlEx Matches | 47 | 0.22 |
 | Mismatch threshold | 35 | 0.86 |
-| allelematch | 31 | 0.95 |
 | Likelihood ratio | 30 | 0.98 |
 | **Sethi et al. (2016)** | **28** | **1.00** |
 
@@ -111,8 +110,8 @@ Reproduce the experiment with `Rscript compare_reps_vs_consensus.R`.
 > which one it wants.
 
 Only the two likelihood methods can use replicates. Exact matching, the mismatch
-threshold, GenAlEx and allelematch compare one genotype per sample, so they keep
-running on a consensus and the comparison tab stays meaningful.
+threshold and GenAlEx compare one genotype per sample, so they keep running on a
+consensus and the comparison tab stays meaningful.
 
 ## Your file format
 
@@ -165,9 +164,30 @@ in the sidebar to see whether it changes anything.
 | Quality flags | `AG*`, `CT?` | Flag stripped, genotype kept. If a flag means "do not trust this", set those cells to missing first |
 
 > **One column per locus, not two.** If your file has `LOC01a` and `LOC01b` as
-> separate columns — the layout GenAlEx and allelematch use internally — join
-> each pair into a single column first. The app converts back internally when it
-> hands data to allelematch.
+> separate columns — the layout GenAlEx uses internally — join each pair into a
+> single column first.
+
+### Coordinates, for the Scat map tab
+
+Add two more columns and every sample appears on a map. They are optional —
+every other tab works without them.
+
+| SampleID | Latitude | Longitude | LOC01 | LOC02 |
+|---|---|---|---|---|
+| WFS_001 | 55.62771 | -132.87711 | AG | CC |
+| WFS_002 | 55.48210 | -132.81940 | AA | CT |
+
+**Decimal degrees**, with west and south written negative. Columns named
+`Latitude`/`Longitude` (or `Lat`/`Lon`, `Lat`/`Long`, `Y`/`X` spelled out as
+`ycoord`/`xcoord`) are found automatically; anything else you pick in the
+sidebar.
+
+**UTM works too.** Name the columns `Easting` and `Northing` and the app asks
+for the zone and hemisphere, then converts to WGS84 for you.
+
+On a Format B file — one row per replicate — put the same position on every row
+of a sample; the app takes one position per sample. Samples with no position are
+left off the map and reported nowhere else, so a partly-mapped file is fine.
 
 ### What the app does for you
 
@@ -199,8 +219,7 @@ git clone https://github.com/taaltree/genoID.git
 cd genoID && Rscript -e "shiny::runApp('app', port = 4599)"
 ```
 
-Needs `shiny`, `bslib`, `DT`, `ggplot2`. `allelematch` is optional — without it
-that method falls back to a built-in equivalent instead of failing.
+Needs `shiny`, `bslib`, `DT`, `ggplot2` and `leaflet`.
 
 ## Using the R functions directly
 
@@ -282,9 +301,9 @@ cutoff: one sample, one thousandth of a probability, and a whole animal either
 appears or does not.
 
 It works for every method: the likelihood methods are scored on the posterior
-scale, the counting methods on mismatching loci. allelematch never exposes a
-per-pair score, so it borrows the mismatch counts, which are a property of the
-data rather than of any method.
+scale, the counting methods on mismatching loci. A method that clusters
+internally and exposes no per-pair score borrows the mismatch counts, which are
+a property of the data rather than of any method.
 
 ## Every sample coming back as a unique individual?
 
@@ -346,7 +365,7 @@ with a plain-language description and a button through to its full derivation
 and equations on the Methods tab.
 
 Every method still runs behind the scenes, so the **Method comparison** tab
-shows all six side by side whatever you picked. Switching method on the sidebar
+shows all five side by side whatever you picked. Switching method on the sidebar
 re-reports the Individuals tab instantly, without recomputing.
 
 Results are not computed until you press **Identify individuals** — the Data &

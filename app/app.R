@@ -21,6 +21,11 @@ mp <- c("methods_page.R", "app/methods_page.R", "../app/methods_page.R")
 source(mp[file.exists(mp)][1])
 gl <- c("glossary.R", "app/glossary.R", "../app/glossary.R")
 source(gl[file.exists(gl)][1])
+mt <- c("map_tab.R", "app/map_tab.R", "../app/map_tab.R")
+## local = TRUE matters: Shiny evaluates app.R in its own environment, so a
+## default source() would define these in globalenv -- the parent -- where they
+## could not see GID_METHODS or dt().
+source(mt[file.exists(mt)][1], local = TRUE)
 
 options(shiny.maxRequestSize = 60 * 1024^2)
 
@@ -76,14 +81,6 @@ GID_METHODS <- list(
                    "inspection, and P(ID) / P(ID)sib."),
     good   = "Continuity with what your lab already runs, and the near-match list is genuinely useful.",
     watch  = "Identification is exact matching, so a single dropout splits one animal in two."),
-  allelematch = list(
-    label  = "allelematch",
-    anchor = "m-am", tag = "gut check",
-    blurb  = paste("Galpern et al. (2012). Scores dissimilarity as the fraction of",
-                   "mismatching alleles, clusters, and picks its own threshold by",
-                   "minimising samples it cannot classify."),
-    good   = "An independent published check that chooses its own settings.",
-    watch  = "Built for microsatellites; on dense SNP panels with missing data it tends to over-split."),
   exact = list(
     label  = "Exact match",
     anchor = "m-exact", tag = "baseline",
@@ -117,10 +114,30 @@ dt <- function(x, ..., relabel = TRUE) {
     JS(sprintf("function(thead){var t=%s;$(thead).find('th').each(function(i){
          if(t[i]){$(this).attr('title',t[i]).addClass('gid-th-tip');}});}",
        jsonlite::toJSON(tips))) else NULL
+  ## DT renders server-side, so the browser only ever holds the page currently
+  ## on screen. DataTables' own CSV export can see nothing else, which is why it
+  ## produced a 12-row file and forced people to page through and download each
+  ## page separately. Stash the whole frame under this output's id and let the
+  ## button ask R for it instead.
+  sess <- shiny::getDefaultReactiveDomain()
+  oid  <- tryCatch(shiny::getCurrentOutputInfo()$name, error = function(e) NULL)
+  if (!is.null(sess) && !is.null(oid)) {
+    if (is.null(sess$userData$gid_tables))
+      sess$userData$gid_tables <- new.env(parent = emptyenv())
+    assign(oid, x, envir = sess$userData$gid_tables)
+  }
+  dl_btn <- list(extend = "csv", text = "Download CSV", className = "gid-dt-dl",
+                 action = JS(
+    "function(e, dt, node, config) {",
+    "  var id = $(dt.table().container()).closest('.html-widget').attr('id');",
+    "  Shiny.setInputValue('gid_dl_table', {id: id, nonce: Math.random()},",
+    "                      {priority: 'event'});",
+    "}"))
+
   datatable(
     x, rownames = FALSE, extensions = "Buttons",
     options = c(list(pageLength = 12, scrollX = TRUE, dom = "Bfrtip",
-                     buttons = list(list(extend = "csv", text = "Download CSV"))),
+                     buttons = list(dl_btn)),
                 if (length(num)) list(columnDefs = list(
                   list(className = "dt-body-right", targets = num))),
                 if (!is.null(hdr)) list(headerCallback = hdr)),
@@ -224,6 +241,17 @@ ui <- page_navbar(
     .gid-flag{background:#fdf3ee;border-left:3px solid %s;padding:.55rem .8rem;margin:.4rem 0;
               font-size:.85rem;border-radius:0 4px 4px 0}
     .gid-ok{background:#eef5f0;border-left:3px solid #4a7c59}
+    .gid-label{font-weight:700;font-size:.78rem;letter-spacing:.05em;text-transform:uppercase;
+               color:#6b7a8f;margin:.2rem 0 .4rem}
+    .gid-legend{max-height:330px;overflow:auto}
+    .gid-legend-row{display:flex;align-items:center;gap:.45rem;font-size:.82rem;padding:.1rem 0}
+    .gid-swatch{width:13px;height:13px;border-radius:3px;flex:none;border:1px solid rgba(0,0,0,.18)}
+    .gid-kv td{padding:.22rem .4rem;font-size:.84rem;border-color:#eef2f6}
+    .gid-kv td:first-child{white-space:nowrap;width:1%%}
+    .gid-kv td:last-child{word-break:break-word}
+    .gid-geno td{padding:.12rem .4rem;font-size:.78rem;border-color:#f2f5f8}
+    .gid-geno code{font-size:.76rem}
+    .leaflet-container{border-radius:4px}
     .nav-link{font-size:.9rem}
     .value-box-showcase{max-width:64px!important;flex-basis:64px!important;padding:0!important}
     .value-box-showcase svg,.value-box-showcase .fa,.value-box-showcase i{
@@ -311,7 +339,7 @@ ui <- page_navbar(
     uiOutput("method_hint"),
 
     ## Settings for the chosen method. The other methods keep their values while
-    ## hidden, so the comparison tab can still run all six.
+    ## hidden, so the comparison tab can still run all five.
     conditionalPanel(
       "input.method == 'probabilistic'",
       selectInput("kinship", "Compare against", selected = "full_sib",
@@ -353,10 +381,6 @@ ui <- page_navbar(
            "rather than merged automatically.")),
 
     conditionalPanel(
-      "input.method == 'allelematch'",
-      hint("allelematch selects its own threshold from your data. Nothing to set.")),
-
-    conditionalPanel(
       "input.method == 'exact'",
       hint("No tolerance to set \u2014 that is the point of this baseline.")),
 
@@ -393,9 +417,36 @@ ui <- page_navbar(
         hint("The comparison tab runs everything ticked here. Untick the slow ones ",
              "if you only care about your chosen method."),
         checkboxInput("run_sethi", "Sethi et al. (2016)", TRUE),
-        checkboxInput("run_genalex", "GenAlEx Matches", TRUE),
-        checkboxInput("run_am", "allelematch", TRUE))
+        checkboxInput("run_genalex", "GenAlEx Matches", TRUE))
     ),
+
+    ## Map controls. Keyed on the open tab rather than the method, because the
+    ## map deliberately lets you colour by a model other than the one the
+    ## Individuals tab is showing.
+    conditionalPanel(
+      "input.nav == 'Scat map'",
+      tags$hr(),
+      tags$p(class = "gid-label", "Map"),
+      selectInput("map_model", "Colour individuals by", choices = NULL),
+      hint("Switch models to see which samples change hands. The points stay ",
+           "put; only the colouring changes."),
+      checkboxInput("map_grey", "Grey out animals seen once", TRUE),
+      uiOutput("map_coord_ui"),
+      tags$hr(),
+      tags$p(class = "gid-label", "Link samples of the same animal"),
+      radioButtons("map_link_style", NULL,
+                   c("No links" = "none",
+                     "Spider (lines to centre)" = "spider",
+                     "Polygon (convex hull)" = "polygon"),
+                   selected = "none"),
+      selectizeInput("map_link_who", "Which animals", choices = NULL,
+                     multiple = TRUE,
+                     options = list(placeholder = "Choose one or more")),
+      tags$div(
+        class = "d-flex gap-2",
+        actionButton("map_link_all", "All", class = "btn-sm btn-outline-secondary"),
+        actionButton("map_link_none", "Clear", class = "btn-sm btn-outline-secondary")),
+      hint("Only animals with two or more mapped samples can be linked.")),
 
     actionButton("run", "Identify individuals", icon = icon("play"),
                  class = "btn-primary w-100"),
@@ -520,6 +571,8 @@ ui <- page_navbar(
          DTOutput("tbl_roster"))
   ),
 
+  gid_map_tab_ui(),
+
   nav_panel(
     "Method comparison", icon = icon("code-compare"),
     uiOutput("run_status_cmp"),
@@ -597,7 +650,7 @@ ui <- page_navbar(
 
   nav_spacer(),
   nav_item(tags$a(href = "#", onclick = "return false;", class = "gid-sub",
-                  "P(ID) after Waits et al. 2001 · allelematch after Galpern et al. 2012"))
+                  "P(ID) after Waits et al. 2001 · match calling after Sethi et al. 2016"))
 )
 
 # ======================================================================== SERVER
@@ -1041,14 +1094,8 @@ server <- function(input, output, session) {
                                     near_match_loci = input$near_match,
                                     linkage = input$linkage)
       }
-      if (isTRUE(input$run_am)) {
-        incProgress(0.25, detail = "allelematch")
-        out$allelematch <- try(gid_by_group(p$gt, p$grp, gid_method_allelematch,
-                                            min_loci = input$min_loci), silent = TRUE)
-        if (inherits(out$allelematch, "try-error")) out$allelematch <- NULL
-      }
       incProgress(0.1, detail = "comparing")
-      ord <- c("exact", "threshold", "genalex", "allelematch", "sethi", "probabilistic")
+      ord <- c("exact", "threshold", "genalex", "sethi", "probabilistic")
       list(methods = out[ord[ord %in% names(out)]],
            cmp = gid_compare_methods(out), gt = p$gt, grp = p$grp,
            sweep = gid_threshold_sweep(p$gt, max_k = 6, min_loci = input$min_loci,
@@ -1164,9 +1211,9 @@ server <- function(input, output, session) {
   evidence <- reactive({
     r <- res(); req(r)
     b <- best(); pp <- b$pairs
-    ## allelematch does its own clustering internally and never exposes a
-    ## pairwise table, so fall back to the plain locus-mismatch counts, which
-    ## are a property of the data rather than of any method.
+    ## A method that clusters internally exposes no pairwise table. Fall back
+    ## to plain locus-mismatch counts, which are a property of the data rather
+    ## than of any method.
     borrowed <- FALSE
     if (is.null(pp) || !nrow(pp)) {
       pp <- r$methods$exact$pairs
@@ -1177,7 +1224,7 @@ server <- function(input, output, session) {
     if (borrowed)
       return(list(v = pp$n_mismatch, cut = NA_real_, x = "Loci that differ",
                   kind = "mm",
-                  note = paste("allelematch clusters internally and does not expose a",
+                  note = paste("This method clusters internally and does not expose a",
                                "score per pair, so this shows how many loci differ",
                                "between each pair of samples \u2014 a property of your",
                                "data, not of the method.")))
@@ -1321,8 +1368,8 @@ server <- function(input, output, session) {
   ## ---- sample -> individual map with per-sample confidence ----------------
   conf <- reactive({
     r <- res(); req(r); b <- best(); req(b)
-    ## allelematch clusters internally and never exposes a per-pair score, so
-    ## borrow the locus-mismatch counts, which are a property of the data.
+    ## A method that clusters internally exposes no per-pair score, so borrow
+    ## the locus-mismatch counts, which are a property of the data.
     if (is.null(b$pairs) ||
         (!is.null(b$by_group) &&
          all(vapply(b$by_group, function(e) is.null(e$pairs), TRUE)))) {
@@ -1587,7 +1634,6 @@ server <- function(input, output, session) {
       "  mismatch threshold %d loci\n",
       "  Sethi et al. 2016  %s\n",
       "  GenAlEx Matches    %s\n",
-      "  allelematch        %s\n",
       "\nResult: %d samples -> %d individuals\n"),
       input$file$name %||% "-", nrow(r$gt), ncol(r$gt),
       paste(colnames(r$gt), collapse = " "),
@@ -1602,7 +1648,6 @@ server <- function(input, output, session) {
                 paste(input$sethi_rel, collapse = ", ")) else "not run",
       if (isTRUE(input$run_genalex))
         sprintf("run, near matches within %d loci", input$near_match) else "not run",
-      if (isTRUE(input$run_am)) "run" else "not run",
       nrow(r$gt), length(unique(best()$assignment$individual)))
   })
   output$params_txt <- renderText(params())
@@ -1630,6 +1675,24 @@ server <- function(input, output, session) {
       send_file(sprintf("genoID_%s_%s.csv", name, format(Sys.Date())), as_csv(d))
     })
   }
+
+  gid_map_server(input, output, session, list(
+    res = res, best = best, conf = conf, prep = prep, run_status = run_status))
+
+  ## Every table's Download CSV button lands here. The table sends its output
+  ## id and dt() stashed the complete frame under that id when it rendered, so
+  ## what leaves is the whole table regardless of which page is on screen.
+  observeEvent(input$gid_dl_table, {
+    id  <- input$gid_dl_table$id
+    env <- session$userData$gid_tables
+    d <- if (!is.null(env) && !is.null(id) &&
+             exists(id, envir = env, inherits = FALSE)) get(id, envir = env)
+    if (is.null(d) || !NROW(d))
+      return(showNotification("Nothing to download from this table yet.",
+                              type = "warning"))
+    send_file(sprintf("genoID_%s_%s.csv", sub("^tbl_", "", id), format(Sys.Date())),
+              as_csv(d))
+  })
 
   dl_button("dl_assign", "assignments",           function() final_tbl())
   dl_button("dl_pairs",  "pairwise",              function() best()$pairs)
@@ -1672,8 +1735,6 @@ server <- function(input, output, session) {
         a(sprintf("near_match_loci = %s", input$near_match),
           sprintf("min_loci = %s", input$min_loci),
           sprintf('linkage = "%s"', input$linkage))),
-      allelematch = sprintf("gid_method_allelematch,\n                     min_loci = %s",
-        input$min_loci),
       exact = sprintf("gid_method_exact,\n                     %s",
         a(sprintf("min_loci = %s", input$min_loci),
           sprintf('linkage = "%s"', input$linkage))))
