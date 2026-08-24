@@ -441,12 +441,26 @@ ui <- page_navbar(
                    selected = "none"),
       selectizeInput("map_link_who", "Which animals", choices = NULL,
                      multiple = TRUE,
-                     options = list(placeholder = "Choose one or more")),
+                     options = list(placeholder = "All animals")),
+      actionButton("map_link_none", "Clear selection",
+                   class = "btn-sm btn-outline-secondary"),
+      hint("Leave the list empty to link every animal. Pick one or more to link ",
+           "only those. Only animals with two or more mapped samples appear."),
+      tags$hr(),
+      tags$p(class = "gid-label", "Save the map"),
       tags$div(
         class = "d-flex gap-2",
-        actionButton("map_link_all", "All", class = "btn-sm btn-outline-secondary"),
-        actionButton("map_link_none", "Clear", class = "btn-sm btn-outline-secondary")),
-      hint("Only animals with two or more mapped samples can be linked.")),
+        actionButton("dl_map_pdf", "PDF", icon = icon("file-pdf"),
+                     class = "btn-sm btn-outline-secondary flex-fill"),
+        actionButton("dl_map_jpg", "JPG", icon = icon("file-image"),
+                     class = "btn-sm btn-outline-secondary flex-fill")),
+      hint("PDF is vector, for figures you will scale or edit. JPG is raster. ",
+           "Both draw the points and links as a clean figure without the ",
+           "basemap tiles \u2014 tiles are copyrighted images and cannot go into ",
+           "a vector file."),
+      numericInput("map_fig_width", "Figure width (inches)", 9, 3, 20, 0.5),
+      checkboxInput("map_fig_labels", "Name the linked animals on the figure", TRUE),
+      hint("Turn the names off when many animals overlap.")),
 
     actionButton("run", "Identify individuals", icon = icon("play"),
                  class = "btn-primary w-100"),
@@ -1677,7 +1691,8 @@ server <- function(input, output, session) {
   }
 
   gid_map_server(input, output, session, list(
-    res = res, best = best, conf = conf, prep = prep, run_status = run_status))
+    res = res, best = best, conf = conf, prep = prep, run_status = run_status,
+    send_file = send_file))
 
   ## Every table's Download CSV button lands here. The table sends its output
   ## id and dt() stashed the complete frame under that id when it rendered, so

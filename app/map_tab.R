@@ -119,8 +119,104 @@ gid_map_tab_ui <- function() {
         DTOutput("tbl_geo"))))
 }
 
+#' A clean point map of the same thing the leaflet view is showing.
+#'
+#' Basemap tiles are deliberately absent: they are copyrighted raster images and
+#' cannot be embedded in a vector file, so what gets exported is the figure --
+#' points, links, scale bar -- which is what a paper wants anyway.
+gid_map_figure <- function(d, cols, who = character(0), style = "none",
+                           model = "", label_linked = TRUE) {
+  lat0 <- mean(range(d$lat))
+  ## one degree of longitude is cos(latitude) as long as one of latitude, so
+  ## without this the map is stretched east-west
+  asp <- 1 / cos(lat0 * pi / 180)
+
+  p <- ggplot2::ggplot()
+
+  if (length(who) && style != "none") {
+    for (ind in who) {
+      sset <- d[d$individual == ind, , drop = FALSE]
+      if (nrow(sset) < 2) next
+      col <- unname(cols[ind])
+      if (style == "spider") {
+        seg <- data.frame(x = mean(sset$lon), y = mean(sset$lat),
+                          xe = sset$lon, ye = sset$lat)
+        p <- p + ggplot2::geom_segment(
+          data = seg, ggplot2::aes(x = x, y = y, xend = xe, yend = ye),
+          colour = col, linewidth = 0.4, alpha = 0.85)
+      } else {
+        h <- gid_hull(sset$lon, sset$lat)
+        if (is.null(h)) next
+        p <- p + if (nrow(sset) == 2)
+          ggplot2::geom_path(data = h, ggplot2::aes(lon, lat),
+                             colour = col, linewidth = 0.5)
+        else
+          ggplot2::geom_polygon(data = h, ggplot2::aes(lon, lat),
+                                fill = col, alpha = 0.18,
+                                colour = col, linewidth = 0.45)
+      }
+    }
+  }
+
+  d$fill <- unname(cols[d$individual])
+  p <- p +
+    ggplot2::geom_point(data = d,
+      ggplot2::aes(lon, lat, size = n_samples > 1),
+      shape = 21, fill = d$fill, colour = "#33383d", stroke = 0.3) +
+    ggplot2::scale_size_manual(values = c(`FALSE` = 1.7, `TRUE` = 2.9), guide = "none")
+
+  if (label_linked && length(who)) {
+    cen <- do.call(rbind, lapply(who, function(i) {
+      sset <- d[d$individual == i, , drop = FALSE]
+      if (!nrow(sset)) NULL else
+        data.frame(lon = mean(sset$lon), lat = max(sset$lat), lab = i,
+                   stringsAsFactors = FALSE)
+    }))
+    if (!is.null(cen) && nrow(cen))
+      p <- p + ggplot2::geom_text(data = cen, ggplot2::aes(lon, lat, label = lab),
+                                  vjust = -0.9, size = 2.5, colour = "#33383d")
+  }
+
+  ## scale bar: a round number of km that spans about a fifth of the width
+  km_per_deg <- 111.32 * cos(lat0 * pi / 180)
+  span_km <- diff(range(d$lon)) * km_per_deg
+  nice <- c(0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500)
+  bar_km <- nice[which.min(abs(nice - span_km / 5))]
+  x0 <- min(d$lon); y0 <- min(d$lat) - diff(range(d$lat)) * 0.06
+  bar <- data.frame(x = x0, xe = x0 + bar_km / km_per_deg, y = y0, ye = y0)
+  p <- p +
+    ggplot2::geom_segment(data = bar, ggplot2::aes(x = x, y = y, xend = xe, yend = ye),
+                          linewidth = 0.8, colour = "#33383d") +
+    ggplot2::annotate("text", x = x0 + bar_km / km_per_deg / 2, y = y0,
+                      label = paste0(bar_km, " km"), vjust = -0.6, size = 2.6,
+                      colour = "#33383d")
+
+  n_ind <- length(unique(d$individual))
+  p +
+    ggplot2::coord_fixed(ratio = asp, clip = "off") +
+    ggplot2::labs(
+      x = NULL, y = NULL,
+      title = "Samples by individual",
+      subtitle = sprintf("%d samples, %d individuals%s%s", nrow(d), n_ind,
+                         if (nzchar(model)) paste0(" \u00b7 ", model) else "",
+                         if (length(who) && style != "none")
+                           sprintf(" \u00b7 %s linking %d animal%s", style,
+                                   length(who), if (length(who) == 1) "" else "s")
+                         else "")) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major = ggplot2::element_line(colour = "#e8edf2", linewidth = 0.3),
+      axis.text = ggplot2::element_text(colour = "#6b7a8f", size = 7),
+      plot.title = ggplot2::element_text(face = "bold", colour = "#1d3557", size = 12),
+      plot.subtitle = ggplot2::element_text(colour = "#6b7a8f", size = 8.5),
+      plot.margin = ggplot2::margin(8, 12, 8, 8))
+}
+
 # ------------------------------------------------------------------------ SERVER
-#' @param deps list of reactives: res, best, conf, prep, method_label
+#' @param deps res, best, conf, prep, run_status, and send_file -- the last is
+#'   defined inside app.R's server body, which is a child of the environment
+#'   these functions live in, so it has to be handed over rather than inherited.
 gid_map_server <- function(input, output, session, deps) {
 
   ## ---- coordinates ---------------------------------------------------------
@@ -240,13 +336,19 @@ gid_map_server <- function(input, output, session, deps) {
     sort(unique(d$individual[d$n_samples > 1]))
   })
 
+  ## An empty selection means every animal, not none. Requiring a pick before
+  ## the radio does anything made Spider and Polygon look broken: you chose one
+  ## and the map did not change.
+  link_targets <- reactive({
+    who <- input$map_link_who %||% character(0)
+    who <- intersect(who, linkable())
+    if (length(who)) who else linkable()
+  })
+
   observeEvent(linkable(), {
     updateSelectizeInput(session, "map_link_who", choices = linkable(),
                          selected = intersect(input$map_link_who, linkable()),
                          server = FALSE)
-  })
-  observeEvent(input$map_link_all, {
-    updateSelectizeInput(session, "map_link_who", selected = linkable())
   })
   observeEvent(input$map_link_none, {
     updateSelectizeInput(session, "map_link_who", selected = character(0))
@@ -261,8 +363,8 @@ gid_map_server <- function(input, output, session, deps) {
   output$geo_map <- leaflet::renderLeaflet({
     d <- pts(); req(nrow(d) > 0)
     cols  <- pal()
-    who   <- input$map_link_who %||% character(0)
     style <- input$map_link_style %||% "none"
+    who   <- link_targets()
 
     m <- leaflet::leaflet() |>
       leaflet::addProviderTiles("Esri.WorldTopoMap", group = "Topographic") |>
@@ -377,6 +479,58 @@ gid_map_server <- function(input, output, session, deps) {
           tags$span(class = "gid-hint",
                     sprintf(" %d", sum(d$individual == i)))))))
   })
+
+  ## ---- save the map --------------------------------------------------------
+  ## Rendered to a temp file and handed over as base64 through the same Blob
+  ## path the CSVs use, so it works with no server behind it.
+  save_map <- function(fmt) {
+    d <- tryCatch(pts(), error = function(e) NULL)
+    if (is.null(d) || !nrow(d))
+      return(showNotification("Nothing to save yet - run the analysis first.",
+                              type = "warning"))
+    w <- input$map_fig_width %||% 9
+    if (!is.finite(w) || w < 3) w <- 9
+    h <- w * 0.78
+    fig <- gid_map_figure(d, pal(), link_targets(),
+                          input$map_link_style %||% "none",
+                          GID_METHODS[[input$map_model %||% input$method]]$label %||% "",
+                          label_linked = isTRUE(input$map_fig_labels))
+
+    ext <- fmt; dev_ok <- TRUE
+    f <- tempfile(fileext = paste0(".", ext))
+    if (fmt == "pdf") {
+      grDevices::pdf(f, width = w, height = h, useDingbats = FALSE)
+      print(fig); grDevices::dev.off()
+    } else {
+      ## Not every R build ships a JPEG device -- webR in particular -- so fall
+      ## back to PNG rather than failing, and say so.
+      if (isTRUE(unname(capabilities("jpeg")))) {
+        grDevices::jpeg(f, width = w, height = h, units = "in", res = 300, quality = 95)
+      } else if (isTRUE(unname(capabilities("png")))) {
+        ext <- "png"; f <- tempfile(fileext = ".png"); dev_ok <- FALSE
+        grDevices::png(f, width = w, height = h, units = "in", res = 300)
+      } else {
+        return(showNotification(
+          "This build of R has no raster graphics device. Use the PDF button - it is vector and scales to any size.",
+          type = "warning", duration = 10))
+      }
+      print(fig); grDevices::dev.off()
+      if (!dev_ok)
+        showNotification("Saved as PNG: this build of R has no JPEG device.",
+                         type = "message", duration = 7)
+    }
+
+    raw <- readBin(f, "raw", file.info(f)$size)
+    unlink(f)
+    deps$send_file(sprintf("genoID_map_%s.%s", format(Sys.Date()), ext),
+                   jsonlite::base64_enc(raw), b64 = TRUE,
+                   type = switch(ext, pdf = "application/pdf",
+                                 jpg = "image/jpeg", png = "image/png",
+                                 "application/octet-stream"))
+  }
+
+  observeEvent(input$dl_map_pdf, save_map("pdf"))
+  observeEvent(input$dl_map_jpg, save_map("jpg"))
 
   output$tbl_geo <- renderDT({
     d <- pts()
