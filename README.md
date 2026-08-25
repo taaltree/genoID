@@ -22,12 +22,18 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
 | **Sample map** | Which animal each sample belongs to, with a confidence measure per sample: how firmly it is held in its own cluster, what it nearly matched instead, and whether the assignment would survive a different cutoff. Downloadable as your capture history |
-| **Scat map** | Every sample plotted where it was collected, coloured by which animal it belongs to. Switch the colouring between methods to see which samples change hands, click a scat for its ID, its individual and its full genotype, and link an animal's samples with a spider plot or a convex hull |
+| **Scat map** | Every sample plotted where it was collected, coloured by which animal it belongs to. Switch the colouring between methods to see which samples change hands, click a scat for its ID, its individual and its full genotype, and link an animal's samples with a spider plot or a convex hull. Filter by individual, sex or year, and save the figure as vector PDF or raster JPG |
 | **Method comparison** | All five methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
 | **Methods** | Notation, a worked example carried through all five methods, the statistical model behind each one, and a glossary defining every column the app can show you |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
+
+**Save your work.** *Save project* writes one JSON file holding your data and
+every setting you chose; *Open project* puts them all back. The data travels
+inside the file rather than as a path, so a project still opens after the file
+moves, is renamed, or lands on a colleague's laptop. Nothing is uploaded
+anywhere — the file is written and read in your browser.
 
 ## The five methods
 
@@ -166,6 +172,25 @@ in the sidebar to see whether it changes anything.
 > **One column per locus, not two.** If your file has `LOC01a` and `LOC01b` as
 > separate columns — the layout GenAlEx uses internally — join each pair into a
 > single column first.
+
+### Sex and date, for naming and filtering
+
+Two more optional columns. With a sex column present, animals are named
+**F1, F2, M1, M2** in order of how often each was detected, and the map can be
+filtered by sex. With a date column, it can be filtered by year.
+
+| SampleID | Sex | CollDate | Latitude | Longitude |
+|---|---|---|---|---|
+| WFS_001 | XX | 2024-11-19 | 55.62771 | -132.87711 |
+| WFS_002 | XY | 2025-07-08 | 55.48210 | -132.81940 |
+
+Sex is read from `XX`/`XY`, `X/X`/`X/Y`, `M`/`F` or `Male`/`Female`. Numeric
+codings such as 1/2 are deliberately **not** guessed — 1 = female and 1 = male
+are both in common use — so recode those to letters first. Dates can be ISO,
+`MM/DD/YYYY`, `DD/MM/YYYY`, an Excel serial number, or a bare year.
+
+Both columns are found automatically by what their values look like, and you can
+override the choice in the sidebar.
 
 ### Coordinates, for the Scat map tab
 

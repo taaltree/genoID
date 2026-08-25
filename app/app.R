@@ -21,11 +21,13 @@ mp <- c("methods_page.R", "app/methods_page.R", "../app/methods_page.R")
 source(mp[file.exists(mp)][1])
 gl <- c("glossary.R", "app/glossary.R", "../app/glossary.R")
 source(gl[file.exists(gl)][1])
+pj <- c("project.R", "app/project.R", "../app/project.R")
 mt <- c("map_tab.R", "app/map_tab.R", "../app/map_tab.R")
 ## local = TRUE matters: Shiny evaluates app.R in its own environment, so a
 ## default source() would define these in globalenv -- the parent -- where they
 ## could not see GID_METHODS or dt().
 source(mt[file.exists(mt)][1], local = TRUE)
+source(pj[file.exists(pj)][1], local = TRUE)
 
 options(shiny.maxRequestSize = 60 * 1024^2)
 
@@ -297,6 +299,8 @@ ui <- page_navbar(
          "replicate. See ", tags$b("Your file format"), " on the Methods tab."),
     actionLink("load_demo", "or load the example dataset", class = "gid-hint"),
     uiOutput("demo_note"),
+    tags$hr(style = "margin:.9rem 0 .8rem"),
+    gid_project_ui(),
     conditionalPanel("output.is_excel == true",
                      selectInput("sheet", "Worksheet", choices = NULL)),
 
@@ -432,6 +436,22 @@ ui <- page_navbar(
            "put; only the colouring changes."),
       checkboxInput("map_grey", "Grey out animals seen once", TRUE),
       uiOutput("map_coord_ui"),
+      uiOutput("map_meta_ui"),
+
+      tags$hr(),
+      tags$p(class = "gid-label", "Show on the map"),
+      hint("Leave a filter empty to show everything. They combine, so you can ",
+           "ask for one year of females and get only those."),
+      checkboxGroupInput("map_show_sex", "Sex", inline = TRUE,
+                         choices = c("Female" = "F", "Male" = "M",
+                                     "Not called" = "U")),
+      selectizeInput("map_show_year", "Year", choices = NULL, multiple = TRUE,
+                     options = list(placeholder = "All years")),
+      selectizeInput("map_show_who", "Individuals", choices = NULL, multiple = TRUE,
+                     options = list(placeholder = "All individuals")),
+      actionButton("map_show_reset", "Show everything",
+                   class = "btn-sm btn-outline-secondary"),
+
       tags$hr(),
       tags$p(class = "gid-label", "Link samples of the same animal"),
       radioButtons("map_link_style", NULL,
@@ -680,6 +700,11 @@ server <- function(input, output, session) {
   })
 
   demo_loaded <- reactiveVal(FALSE)
+  ## What the loaded data should be called. Tracked separately from
+  ## input$file$name because a project restores data without a file upload.
+  source_name <- reactiveVal("")
+  observeEvent(input$file, source_name(input$file$name))
+  observeEvent(input$load_demo, source_name("example dataset"))
   observeEvent(input$load_demo, {
     f <- c("demo/demo_genotypes.csv", "app/demo/demo_genotypes.csv")
     f <- f[file.exists(f)]
@@ -1649,7 +1674,7 @@ server <- function(input, output, session) {
       "  Sethi et al. 2016  %s\n",
       "  GenAlEx Matches    %s\n",
       "\nResult: %d samples -> %d individuals\n"),
-      input$file$name %||% "-", nrow(r$gt), ncol(r$gt),
+      if (nzchar(source_name())) source_name() else "-", nrow(r$gt), ncol(r$gt),
       paste(colnames(r$gt), collapse = " "),
       if (length(setdiff(detected(), loci()))) paste(setdiff(detected(), loci()), collapse = " ") else "none",
       if (nzchar(input$group_col %||% "")) input$group_col else "not grouped",
@@ -1689,6 +1714,10 @@ server <- function(input, output, session) {
       send_file(sprintf("genoID_%s_%s.csv", name, format(Sys.Date())), as_csv(d))
     })
   }
+
+  gid_project_server(input, output, session, list(
+    raw = raw, demo_loaded = demo_loaded, source_name = source_name,
+    send_file = send_file))
 
   gid_map_server(input, output, session, list(
     res = res, best = best, conf = conf, prep = prep, run_status = run_status,
