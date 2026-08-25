@@ -55,6 +55,13 @@ gid_project_bundle <- function(input, data, source_name = "", demo = FALSE,
     n_rows         = nrow(data),
     n_cols         = ncol(data),
     settings       = vals,
+    ## where the map was looking, so it reopens on the same ground rather than
+    ## snapping back to the full extent
+    map_view       = if (!is.null(input$geo_map_center))
+                       list(lng = input$geo_map_center$lng,
+                            lat = input$geo_map_center$lat,
+                            zoom = input$geo_map_zoom) else NULL,
+    map_selected   = input$geo_map_marker_click$id,
     data_gz_b64    = jsonlite::base64_enc(
                        memCompress(charToRaw(csv), "gzip"))),
     auto_unbox = TRUE, null = "null"))
@@ -135,17 +142,25 @@ gid_project_server <- function(input, output, session, deps) {
     showNotification("Project saved.", type = "message", duration = 4)
   })
 
-  ## Settings are applied several times over about a second rather than once.
-  ## Loading the data fires the observers that repopulate the column pickers
-  ## from scratch, and those would otherwise overwrite the restored choices a
-  ## beat after they were set.
+  ## Restoring happens in two phases because the controls do not all exist at
+  ## the same time. Phase one puts back everything the data alone supports, then
+  ## starts the analysis. Phase two waits for results and puts back the map
+  ## controls, whose menus -- the model picker, the individual and year filters
+  ## -- are built from the results and so were empty a moment earlier.
+  ##
+  ## Within each phase the settings are applied several times over about a
+  ## second, because loading data fires the observers that rebuild the column
+  ## pickers from scratch and a single pass gets overwritten a beat later.
   pending <- reactiveVal(NULL)
+  phase   <- reactiveVal(0L)
   passes  <- reactiveVal(0L)
+  waited  <- reactiveVal(0L)   # ticks spent waiting for results, kept apart
+                               # from passes so waiting cannot eat the passes
 
   apply_settings <- function(cfg) {
     for (type in names(GID_SAVED_INPUTS))
       for (id in GID_SAVED_INPUTS[[type]]) {
-        if (is.null(cfg[[id]])) next
+        if (is.null(cfg[[id]]) || id %in% GID_MAP_DEFERRED) next
         v <- cfg[[id]]
         switch(type,
           select        = updateSelectInput(session, id, selected = v),
@@ -158,15 +173,98 @@ gid_project_server <- function(input, output, session, deps) {
       }
   }
 
+  ## phase 1 -- wait for the app to finish ingesting the data.
+  ##
+  ## This wait is the whole trick. Setting raw() kicks off the observers that
+  ## detect the ID column and the loci and fill those pickers in. Pushing the
+  ## saved choices in before those menus exist does not just get overwritten --
+  ## selectize silently drops a selection it has no option for, so the server
+  ## ends up holding "" while the widget later displays something sensible, and
+  ## every downstream req() fails on a value the user can plainly see.
+  ##
+  ## Event-driven rather than polled: a poll on a short timer competes with the
+  ## very flush cycle that carries the new input value back from the browser,
+  ## and the value can take seconds to land. Waiting on the event itself has no
+  ## such problem and needs no timeout.
+  observeEvent(input$id_col, {
+    if (is.null(pending()) || phase() != 1L) return()
+    if (!nzchar(input$id_col %||% "")) return()
+    phase(2L); passes(0L)
+  }, ignoreInit = FALSE, ignoreNULL = FALSE)
+
+  ## phase 2 -- now the menus exist, put the saved choices back. Repeated a few
+  ## times because the detection observers settle over several flushes.
   observe({
     cfg <- pending()
-    if (is.null(cfg)) return()
+    if (is.null(cfg) || phase() != 2L) return()
     n <- passes()
-    if (n >= 4L) { pending(NULL); return() }
+    if (n >= 4L) { phase(3L); passes(0L); return() }
     apply_settings(cfg$settings)
     passes(n + 1L)
-    invalidateLater(280, session)
+    invalidateLater(260, session)
   })
+
+  ## phase 3 -- start the analysis, but only once the data actually resolves.
+  ## Launching early is not merely slow: res() is an eventReactive, so a run
+  ## that fails its own req() caches the failure and never recomputes.
+  observe({
+    cfg <- pending()
+    if (is.null(cfg) || phase() != 3L) return()
+    if (!isTRUE(cfg$had_run)) { phase(4L); passes(0L); waited(0L); return() }
+    ok <- tryCatch({ p <- deps$prep(); !is.null(p) && nrow(p$gt) >= 2 },
+                   error = function(e) FALSE)
+    n <- passes()
+    if (!ok) {
+      if (n >= 20L) {                       # ~6 s
+        pending(NULL); phase(0L)
+        showNotification(paste("Reopened the project, but its settings do not",
+                               "produce a runnable dataset. Adjust the sidebar",
+                               "and press Identify individuals."),
+                         type = "warning", duration = 12)
+        return()
+      }
+      passes(n + 1L); invalidateLater(300, session); return()
+    }
+    ## isolate: this observer must not depend on the counter it is setting
+    deps$run_count(isolate(deps$run_count()) + 1L)
+    phase(4L); passes(0L); waited(0L)
+  })
+
+  ## phase 4 -- results exist, so the map controls finally have menus to choose
+  ## from: the model picker and the individual and year filters are all built
+  ## from the results and were empty until now.
+  observe({
+    cfg <- pending()
+    if (is.null(cfg) || phase() != 4L) return()
+    if (isTRUE(cfg$had_run)) {
+      r <- tryCatch(deps$res(), error = function(e) NULL)
+      if (is.null(r)) {
+        w <- waited()
+        if (w >= 30L) {                     # ~10 s
+          pending(NULL); phase(0L)
+          showNotification(paste("Reopened the project and restored its",
+                                 "settings, but the analysis did not finish.",
+                                 "Press Identify individuals to retry."),
+                           type = "warning", duration = 12)
+          return()
+        }
+        waited(w + 1L); invalidateLater(330, session); return()
+      }
+    }
+    n <- passes()
+    if (n >= 4L) {
+      if (!is.null(cfg$map_view)) deps$restored_view(cfg$map_view)
+      pending(NULL); phase(0L)
+      showNotification("Project fully restored.", type = "message", duration = 5)
+      return()
+    }
+    apply_settings(cfg$settings)
+    passes(n + 1L)
+    invalidateLater(260, session)
+  })
+
+  ## These three are set by the map module instead, when it builds their menus.
+  GID_MAP_DEFERRED <- c("map_show_year", "map_show_who", "map_link_who")
 
   observeEvent(input$proj_open_text, {
     p <- tryCatch(gid_project_parse(input$proj_open_text$body),
@@ -177,14 +275,17 @@ gid_project_server <- function(input, output, session, deps) {
     deps$raw(p$data)
     deps$demo_loaded(isTRUE(p$demo))
     deps$source_name(p$source %||% input$proj_open_text$name)
-    passes(0L); pending(p)
+    deps$pending_map(list(year     = p$settings$map_show_year,
+                          who      = p$settings$map_show_who,
+                          link_who = p$settings$map_link_who))
+    passes(0L); phase(1L); pending(p)
 
     showNotification(
       sprintf("Opened %s - %d samples, %d columns, saved %s.",
               input$proj_open_text$name, p$n_rows, p$n_cols, p$saved),
       type = "message", duration = 8)
     if (isTRUE(p$had_run))
-      showNotification("Press Identify individuals to recompute the results.",
-                       type = "default", duration = 10)
+      showNotification("Recomputing the results this project was saved with...",
+                       type = "default", duration = 6)
   })
 }

@@ -401,11 +401,16 @@ gid_map_server <- function(input, output, session, deps) {
 
   output$has_coords <- reactive(!is.null(geo()))
   outputOptions(output, "has_coords", suspendWhenHidden = FALSE)
+  ## These live in a conditionalPanel, so they would not render until the tab is
+  ## first opened -- and a project restored before then would have no widgets to
+  ## put its coordinate and sex choices into.
+  outputOptions(output, "map_coord_ui", suspendWhenHidden = FALSE)
+  outputOptions(output, "map_meta_ui", suspendWhenHidden = FALSE)
 
   output$run_status_geo <- renderUI(deps$run_status())
 
   output$map_no_coords <- renderUI({
-    if (input$run == 0) return(NULL)
+    if (deps$run_count() == 0) return(NULL)
     if (!is.null(geo())) return(NULL)
     tags$div(
       class = "gid-flag", style = "margin:1rem 0",
@@ -530,15 +535,31 @@ gid_map_server <- function(input, output, session, deps) {
   observe({
     d <- tryCatch(pts(), error = function(e) NULL)
     req(d)
-    yrs <- sort(unique(d$year[!is.na(d$year)]))
-    updateSelectizeInput(session, "map_show_year",
-                         choices = as.character(yrs),
-                         selected = intersect(input$map_show_year, as.character(yrs)),
-                         server = FALSE)
+    yrs <- as.character(sort(unique(d$year[!is.na(d$year)])))
     who <- gid_sort_animals(unique(d$animal))
+
+    ## A reopened project's filter choices arrive before these menus have any
+    ## options, and selectize discards a selection it has no option for. So the
+    ## project leaves them here and they are claimed at the one moment they can
+    ## be applied: as the options are created.
+    pm <- deps$pending_map()
+    want_year <- if (is.null(pm)) NULL else intersect(pm$year, yrs)
+    want_who  <- if (is.null(pm)) NULL else intersect(pm$who,  who)
+    sel_year <- if (!is.null(want_year)) want_year else intersect(input$map_show_year, yrs)
+    sel_who  <- if (!is.null(want_who))  want_who  else intersect(input$map_show_who,  who)
+
+    ## Held, not cleared on first use. This observer re-runs as the restored
+    ## settings settle, and releasing the selection before the browser has
+    ## echoed it back would let the next run overwrite it with an empty input.
+    if (!is.null(pm) &&
+        setequal(input$map_show_year %||% character(0), want_year) &&
+        setequal(input$map_show_who  %||% character(0), want_who))
+      deps$pending_map(NULL)
+
+    updateSelectizeInput(session, "map_show_year", choices = yrs,
+                         selected = sel_year, server = FALSE)
     updateSelectizeInput(session, "map_show_who", choices = who,
-                         selected = intersect(input$map_show_who, who),
-                         server = FALSE)
+                         selected = sel_who, server = FALSE)
   })
 
   observeEvent(input$map_show_reset, {
@@ -567,9 +588,15 @@ gid_map_server <- function(input, output, session, deps) {
   })
 
   observeEvent(linkable(), {
-    updateSelectizeInput(session, "map_link_who", choices = linkable(),
-                         selected = intersect(input$map_link_who, linkable()),
-                         server = FALSE)
+    lk <- linkable()
+    pm <- deps$pending_map()
+    sel <- if (!is.null(pm)) intersect(pm$link_who, lk) else
+           intersect(input$map_link_who, lk)
+    ## deliberately does not clear pm: the filter observer above owns that, and
+    ## releases it only once every restored selection has come back from the
+    ## browser.
+    updateSelectizeInput(session, "map_link_who", choices = lk,
+                         selected = sel, server = FALSE)
   })
   observeEvent(input$map_link_none, {
     updateSelectizeInput(session, "map_link_who", selected = character(0))
@@ -597,7 +624,15 @@ gid_map_server <- function(input, output, session, deps) {
 
     ## Hold the view the user has panned to, so switching model or linking does
     ## not throw them back to the full extent.
-    ctr <- isolate(input$geo_map_center); zm <- isolate(input$geo_map_zoom)
+    ## isolate() is load-bearing: reading this reactively and then clearing it
+    ## here would invalidate the render that just wrote it, forever.
+    rv <- isolate(deps$restored_view())
+    if (!is.null(rv)) {
+      ctr <- list(lng = rv$lng, lat = rv$lat); zm <- rv$zoom
+      deps$restored_view(NULL)          # once only; the user owns the view after
+    } else {
+      ctr <- isolate(input$geo_map_center); zm <- isolate(input$geo_map_zoom)
+    }
     m <- if (!is.null(ctr) && !is.null(zm))
       leaflet::setView(m, ctr$lng, ctr$lat, zm)
     else
@@ -642,6 +677,17 @@ gid_map_server <- function(input, output, session, deps) {
       fillColor = unname(cols[d$animal]), fillOpacity = 0.85,
       label = lapply(lab, htmltools::HTML))
   })
+
+  ## If the map is already on screen when a project finishes restoring, no fresh
+  ## render is coming, so pan it directly. When it is not yet on screen this does
+  ## nothing and the next render picks the view up instead.
+  observeEvent(deps$restored_view(), {
+    rv <- deps$restored_view()
+    req(rv, !is.null(input$geo_map_zoom))
+    leaflet::leafletProxy("geo_map") |>
+      leaflet::setView(rv$lng, rv$lat, rv$zoom)
+    deps$restored_view(NULL)
+  }, ignoreNULL = TRUE)
 
   ## ---- click a scat --------------------------------------------------------
   output$map_detail <- renderUI({

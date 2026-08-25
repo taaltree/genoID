@@ -700,6 +700,17 @@ server <- function(input, output, session) {
   })
 
   demo_loaded <- reactiveVal(FALSE)
+  ## The analysis is driven by a counter rather than by the button directly, so
+  ## reopening a project can recompute its results without faking a click.
+  run_count <- reactiveVal(0L)
+  observeEvent(input$run, run_count(run_count() + 1L))
+  ## Where the map was looking when a project was saved. renderLeaflet consumes
+  ## this once, then goes back to following the user's own panning.
+  restored_view <- reactiveVal(NULL)
+  ## Map filter selections waiting for their menus to exist. The map module
+  ## claims these the moment it builds those menus, which is the only point at
+  ## which selectize will accept them.
+  pending_map <- reactiveVal(NULL)
   ## What the loaded data should be called. Tracked separately from
   ## input$file$name because a project restores data without a file upload.
   source_name <- reactiveVal("")
@@ -1099,7 +1110,7 @@ server <- function(input, output, session) {
   ## ------------------------------------------------------------- run methods
   run_error <- reactiveVal(NULL)
 
-  res <- eventReactive(input$run, {
+  res <- eventReactive(run_count(), ignoreInit = TRUE, {
     p <- prep(); req(p, nrow(p$gt) >= 2)
     run_error(NULL)
     out <- tryCatch(withProgress(message = "Identifying individuals", value = 0, {
@@ -1214,7 +1225,7 @@ server <- function(input, output, session) {
           "Common causes: too few loci surviving the call-rate filters, or a ",
           "grouping column with a category containing a single sample. Adjust the ",
           "settings in the sidebar and run again.")))
-    if (input$run == 0)
+    if (run_count() == 0)
       return(tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
         tags$b("No results yet. "),
         "Choose your sample ID column and loci in the sidebar, then press ",
@@ -1601,7 +1612,7 @@ server <- function(input, output, session) {
   })
 
   ## ------------------------------------------------------- settings sensitivity
-  sens <- eventReactive(input$run, {
+  sens <- eventReactive(run_count(), ignoreInit = TRUE, {
     p <- prep(); req(p)
     grid <- expand.grid(
       post_cut = sort(unique(c(0.95, 0.99, 0.999, 0.9999, input$post_cut))),
@@ -1717,11 +1728,13 @@ server <- function(input, output, session) {
 
   gid_project_server(input, output, session, list(
     raw = raw, demo_loaded = demo_loaded, source_name = source_name,
-    send_file = send_file))
+    send_file = send_file, run_count = run_count, res = res,
+    prep = prep, restored_view = restored_view, pending_map = pending_map))
 
   gid_map_server(input, output, session, list(
     res = res, best = best, conf = conf, prep = prep, run_status = run_status,
-    send_file = send_file))
+    send_file = send_file, run_count = run_count,
+    restored_view = restored_view, pending_map = pending_map))
 
   ## Every table's Download CSV button lands here. The table sends its output
   ## id and dt() stashed the complete frame under that id when it rendered, so
