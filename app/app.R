@@ -580,6 +580,14 @@ ui <- page_navbar(
              "probability. Adding those up says how many mistakes each cutoff ",
              "costs, in both directions, so the choice becomes a stated trade ",
              "instead of a convention."),
+        tags$div(
+          class = "d-flex align-items-center gap-2 flex-wrap",
+          style = "margin-bottom:.6rem",
+          tags$span(class = "gid-hint", style = "margin:0",
+                    "How many wrongly merged pairs across the whole dataset are ",
+                    "you willing to accept?"),
+          tags$div(style = "width:7rem",
+                   numericInput("err_budget", NULL, 1, 0.05, 100, 0.05))),
         uiOutput("calib_verdict"),
         plotOutput("plot_calib", height = 320),
         DTOutput("tbl_calib"))),
@@ -1583,48 +1591,70 @@ server <- function(input, output, session) {
     }))
   })
 
-  output$calib_verdict <- renderUI({
+  ## The recommendation, and the reasoning behind it. Users kept asking what to
+  ## pick, which meant the table alone was not answering the question.
+  recommendation <- reactive({
     tb <- calib(); req(tb)
-    ## report on the block with the most samples; a handful of samples in a
-    ## minor block cannot reach a high posterior and would misdescribe the run
-    g  <- tb$group[which.max(tb$n_ids)]
-    x  <- tb[tb$group == g, ]
-    mx <- x$max_post[1]
-    cur <- input$post_cut
-    usable <- x$cutoff <= mx
-    rng <- if (any(usable)) range(x$n_individuals[usable]) else c(NA, NA)
-    within <- x$cutoff[x$exp_false_merges <= 1 & usable]
+    g <- tb$group[which.max(tb$n_ids)]
+    x <- tb[tb$group == g, ]
+    r <- gid_recommend_cutoff(x, budget = input$err_budget %||% 1,
+                              max_post = x$max_post[1])
+    if (is.null(r)) return(NULL)
+    r$group <- g; r$max_post <- x$max_post[1]; r$table <- x
+    r
+  })
 
-    if (mx < cur) {
-      sug <- if (any(usable)) max(x$cutoff[usable]) else NA
-      return(tags$div(class = "gid-flag",
-        tags$b("This is why every sample is coming back as its own animal. "),
-        sprintf("The most similar pair in your data reaches a posterior of %s, and your cutoff is %s. ",
-                signif(mx, 6), cur),
-        "Nothing can clear the bar, so nothing matches. That is a statement about ",
-        "the bar, not about your animals.",
-        if (!is.na(sug)) tags$div(style = "margin-top:.4rem",
-          tags$b(sprintf("Try %s instead.", sug)),
-          sprintf(" At that cutoff you would expect %.2f false merges across the whole dataset.",
-                  x$exp_false_merges[x$cutoff == sug]))
-        else tags$div(style = "margin-top:.4rem",
-          "No cutoff on the scale works here, which means the panel itself is ",
-          "not separating your samples. Check the loci in use, the minimum loci ",
-          "per pair, and whether the error rates are wildly off.")))
+  output$calib_verdict <- renderUI({
+    r <- recommendation(); req(r)
+    x <- r$table; cur <- input$post_cut
+    at_cur <- x[which.min(abs(x$cutoff - cur)), ]
+
+    head <- if (is.na(r$cutoff)) {
+      tags$div(class = "gid-flag",
+        tags$b("No cutoff works on this data, and that is the finding. "),
+        sprintf("The most similar pair reaches a posterior of %s. ", signif(r$max_post, 4)),
+        "Every sample will come back as its own animal whatever you choose, ",
+        "because nothing can clear any bar. Check the loci in use, the minimum ",
+        "loci per pair, and whether the error rates are far from reality \u2014 ",
+        "an overstated dropout rate flattens every posterior.")
+    } else {
+      tags$div(
+        class = if (r$reason == "plateau") "gid-flag gid-ok" else "gid-flag",
+        tags$div(style = "font-size:1.02rem;margin-bottom:.35rem",
+          tags$b(sprintf("Recommended cutoff: %s", signif(r$cutoff, 6))),
+          sprintf(" \u2014 %d individuals", r$n_individuals)),
+        r$note,
+        tags$div(style = "margin-top:.4rem",
+          sprintf("At that cutoff: %.2f expected false merges and %.1f expected missed recapture pairs.",
+                  r$exp_false_merges, r$exp_missed_pairs)),
+        if (abs(cur - r$cutoff) > 1e-12) tags$div(
+          style = "margin-top:.5rem",
+          actionButton("apply_cutoff",
+                       sprintf("Use %s", signif(r$cutoff, 6)),
+                       class = "btn-sm btn-primary"),
+          tags$span(class = "gid-hint", style = "margin-left:.6rem",
+            sprintf("You are on %s: %.2f false merges, %.1f missed pairs, %d individuals.",
+                    cur, at_cur$exp_false_merges, at_cur$exp_missed_pairs,
+                    at_cur$n_individuals)))
+        else tags$div(class = "gid-hint", style = "margin-top:.4rem",
+                      "This is what you are already using."))
     }
 
-    tags$div(class = "gid-flag gid-ok",
-      tags$b(sprintf("Across every cutoff your panel can actually reach, the answer moves between %d and %d animals.",
-                     rng[1], rng[2])),
-      if (length(within) == sum(usable))
-        sprintf(" Expected false merges stay under 1 throughout, so within this range the cutoff is barely doing any work \u2014 report the range and move on.")
-      else sprintf(" Expected false merges stay under 1 for cutoffs of %s and above.",
-                   min(within)),
-      tags$div(style = "margin-top:.4rem",
-        sprintf("At your current %s: expect %.2f false merges and %.1f missed recapture pairs. ",
-                cur, x$exp_false_merges[which.min(abs(x$cutoff - cur))],
-                x$exp_missed_pairs[which.min(abs(x$cutoff - cur))]),
-        "Raising it further trades a fraction of a merge for many missed matches."))
+    tagList(head,
+      if (!is.na(r$cutoff)) tags$p(class = "gid-hint", style = "margin-top:.5rem",
+        sprintf("Across every cutoff this panel can reach, the answer moves between %d and %d animals. ",
+                r$range_individuals[1], r$range_individuals[2]),
+        "A wide plateau means the cutoff is barely doing any work; a narrow one ",
+        "means your answer turns on it, and the honest thing to report is the range. ",
+        tags$a(href = "#m-cutoff", class = "gid-jump",
+               onclick = "return false;", "How this is decided")))
+  })
+
+  observeEvent(input$apply_cutoff, {
+    r <- recommendation(); req(r, !is.na(r$cutoff))
+    updateSliderInput(session, "post_cut", value = r$cutoff)
+    showNotification(sprintf("Cutoff set to %s. Press Identify individuals to re-run.",
+                             signif(r$cutoff, 6)), type = "message", duration = 7)
   })
 
   output$plot_calib <- renderPlot({

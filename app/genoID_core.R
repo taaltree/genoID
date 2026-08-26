@@ -1516,6 +1516,91 @@ gid_calibrate_threshold <- function(pairs, ids, min_loci = 15, linkage = "single
 }
 
 
+#' Recommend a posterior cutoff, and say why.
+#'
+#' The question "what cutoff should I use?" has no universal answer, but it has
+#' a procedure, and the procedure is worth more than any default:
+#'
+#'   1. Throw away cutoffs the data cannot reach. If the best pair in the panel
+#'      posts 0.997 and the cutoff is 0.999, nothing can match, and every sample
+#'      comes back as its own animal. That is a fact about the bar, not the
+#'      animals, and it is the single most common way this goes wrong.
+#'   2. Throw away cutoffs that cost more than the error budget allows, measured
+#'      in expected false merges -- the sum of (1 - posterior) over accepted
+#'      pairs, which is the number of accepted pairs that are not real.
+#'   3. Among what is left, look for a PLATEAU: a stretch of cutoffs that all
+#'      return the same number of individuals. Inside a plateau the answer is a
+#'      property of the data rather than of the setting, which is exactly what
+#'      you want to be able to say in a methods section.
+#'   4. Recommend the middle of the widest plateau, and report its width.
+#'
+#' A wide plateau means the cutoff is barely doing any work. A narrow one, or
+#' none, means your answer turns on where you drew the line and the honest thing
+#' to report is a range.
+#'
+#' @param tab a table from gid_calibrate_threshold()
+#' @param budget expected false merges you are willing to tolerate, in pairs
+#' @param max_post highest posterior any pair achieved; defaults to the
+#'   attribute gid_calibrate_threshold() left behind
+gid_recommend_cutoff <- function(tab, budget = 1, max_post = NULL) {
+  if (is.null(tab) || !nrow(tab)) return(NULL)
+  if (is.null(max_post)) max_post <- attr(tab, "max_posterior")
+  if (is.null(max_post)) max_post <- Inf
+
+  tab <- tab[order(tab$cutoff), , drop = FALSE]
+  reachable <- tab$cutoff <= max_post
+  if (!any(reachable))
+    return(list(cutoff = NA_real_, reason = "unreachable", plateau = c(NA, NA),
+                n_individuals = NA_integer_, width = 0L,
+                note = paste("No cutoff on the scale can be met: the most similar",
+                             "pair in the data does not reach even the lowest one.",
+                             "The panel is not separating these samples.")))
+
+  ok <- reachable & tab$exp_false_merges <= budget
+  if (!any(ok)) {
+    ## nothing inside budget: take the strictest reachable cutoff and say so
+    k <- max(which(reachable))
+    return(list(cutoff = tab$cutoff[k], reason = "over budget",
+                plateau = rep(tab$cutoff[k], 2),
+                n_individuals = tab$n_individuals[k], width = 1L,
+                exp_false_merges = tab$exp_false_merges[k],
+                exp_missed_pairs = tab$exp_missed_pairs[k],
+                note = sprintf(paste("Even the strictest cutoff your data can reach",
+                                     "expects %.1f false merges, above the budget of %g.",
+                                     "Treat merged pairs as provisional."),
+                               tab$exp_false_merges[k], budget)))
+  }
+
+  cand <- tab[ok, , drop = FALSE]
+  ## runs of consecutive cutoffs returning the same count
+  r <- rle(cand$n_individuals)
+  ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1L
+  best <- which.max(r$lengths)
+  i <- starts[best]; j <- ends[best]
+  mid <- cand$cutoff[i + (j - i) %/% 2]
+  k <- which(tab$cutoff == mid)[1]
+
+  list(cutoff = mid,
+       reason = if (r$lengths[best] > 1) "plateau" else "no plateau",
+       plateau = c(cand$cutoff[i], cand$cutoff[j]),
+       width = as.integer(r$lengths[best]),
+       n_individuals = cand$n_individuals[i],
+       exp_false_merges = tab$exp_false_merges[k],
+       exp_missed_pairs = tab$exp_missed_pairs[k],
+       n_reachable = sum(reachable), n_in_budget = sum(ok),
+       range_individuals = range(tab$n_individuals[reachable]),
+       note = if (r$lengths[best] > 1)
+         sprintf(paste("%d individuals for every cutoff from %s to %s, so the",
+                       "answer is a property of the data rather than of the",
+                       "setting."), cand$n_individuals[i],
+                 cand$cutoff[i], cand$cutoff[j])
+       else
+         paste("No two cutoffs inside the budget agree on the number of",
+               "individuals, so the answer turns on where the line is drawn.",
+               "Report a range rather than a single figure."))
+}
+
+
 #' How safe is each sample's assignment?
 #'
 #' A list of individuals is only as trustworthy as its shakiest sample, and the
