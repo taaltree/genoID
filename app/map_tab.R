@@ -217,6 +217,148 @@ gid_map_tab_ui <- function() {
         DTOutput("tbl_geo"))))
 }
 
+#' Write an htmlwidget to one self-contained HTML file.
+#'
+#' htmlwidgets::saveWidget(selfcontained = TRUE) shells out to pandoc, which
+#' does not exist in the WebAssembly build, so the inlining is done here: every
+#' script and stylesheet is read off disk and embedded, and any url() a
+#' stylesheet points at becomes a data URI. The result opens from a file:// path
+#' or an email attachment with nothing else alongside it.
+gid_widget_html <- function(widget, title = "genoID map") {
+  tags <- htmltools::renderTags(widget)
+
+  mime <- function(f) {
+    switch(tolower(tools::file_ext(f)),
+           png = "image/png", gif = "image/gif", jpg = , jpeg = "image/jpeg",
+           svg = "image/svg+xml", woff = "font/woff", woff2 = "font/woff2",
+           ttf = "font/ttf", "application/octet-stream")
+  }
+  data_uri <- function(path) {
+    raw <- readBin(path, "raw", file.info(path)$size)
+    sprintf("data:%s;base64,%s", mime(path), jsonlite::base64_enc(raw))
+  }
+  read_text <- function(path) paste(readLines(path, warn = FALSE), collapse = "\n")
+
+  head_parts <- character(0)
+  for (d in tags$dependencies) {
+    base <- d$src$file
+    if (is.null(base)) next                      # href-only dependency: skip
+    if (!is.null(d$src$package))
+      base <- system.file(base, package = d$src$package)
+
+    for (css in d$stylesheet) {
+      f <- file.path(base, css)
+      if (!file.exists(f)) next
+      txt <- read_text(f)
+      ## pull in whatever the stylesheet points at, or the marker and layer
+      ## icons would be broken links in the shared file
+      for (u in unique(regmatches(txt, gregexpr("url\\(([^)]+)\\)", txt))[[1]])) {
+        ref <- trimws(gsub("^url\\(|\\)$|[\"']", "", u))
+        ref <- sub("[?#].*$", "", ref)
+        if (!nzchar(ref) || grepl("^(data:|https?:|//)", ref)) next
+        img <- file.path(dirname(f), ref)
+        ## a bare url() can resolve to the stylesheet's own directory
+        if (file.exists(img) && !dir.exists(img))
+          txt <- gsub(u, sprintf("url(%s)", data_uri(img)), txt, fixed = TRUE)
+      }
+      head_parts <- c(head_parts, sprintf("<style>\n%s\n</style>", txt))
+    }
+    for (js in d$script) {
+      f <- file.path(base, js)
+      if (!file.exists(f)) next
+      head_parts <- c(head_parts,
+                      sprintf("<script>\n%s\n</script>", read_text(f)))
+    }
+  }
+
+  paste0(
+    "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\"/>\n",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>\n",
+    "<title>", htmltools::htmlEscape(title), "</title>\n",
+    paste(head_parts, collapse = "\n"), "\n",
+    "<style>html,body{margin:0;padding:0;height:100%;}",
+    ".gid-wrap{height:100%;display:flex;flex-direction:column;",
+    "font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;}",
+    ".gid-head{padding:.6rem .9rem;border-bottom:1px solid #e3e9ef;background:#fff;}",
+    ".gid-head h1{margin:0;font-size:1rem;color:#1d3557;}",
+    ".gid-head p{margin:.15rem 0 0;font-size:.78rem;color:#6b7a8f;}",
+    ".gid-map{flex:1;min-height:0;}",
+    ".gid-map .leaflet,.gid-map .html-widget{height:100%!important;width:100%!important;}",
+    "</style>\n",
+    tags$head, "\n</head>\n<body>\n",
+    "<div class=\"gid-wrap\">",
+    "<div class=\"gid-head\"><h1>", htmltools::htmlEscape(title), "</h1>",
+    "<p>Pan, zoom and click a scat for its details. Switch basemaps with the ",
+    "control at the top right. Made with genoID.</p></div>",
+    "<div class=\"gid-map\">", tags$html, "</div></div>\n",
+    "</body>\n</html>\n")
+}
+
+#' Build the interactive map. Shared by the on-screen view and the exported
+#' HTML file, so the two cannot drift apart.
+#'
+#' @param view NULL to fit the data, or list(lng, lat, zoom) to open somewhere
+gid_leaflet_map <- function(d, cols, who = character(0), style = "none",
+                            view = NULL) {
+  m <- leaflet::leaflet() |>
+    leaflet::addProviderTiles("Esri.WorldTopoMap", group = "Topographic") |>
+    leaflet::addProviderTiles("Esri.WorldImagery", group = "Satellite") |>
+    leaflet::addProviderTiles("CartoDB.Positron",  group = "Plain") |>
+    leaflet::addLayersControl(
+      baseGroups = c("Topographic", "Satellite", "Plain"),
+      options = leaflet::layersControlOptions(collapsed = TRUE))
+
+  m <- if (!is.null(view))
+    leaflet::setView(m, view$lng, view$lat, view$zoom)
+  else
+    leaflet::fitBounds(m, min(d$lon), min(d$lat), max(d$lon), max(d$lat))
+
+  ## links first, so the scats sit on top of them
+  if (length(who) && style != "none") {
+    for (ind in who) {
+      sset <- d[d$animal == ind, , drop = FALSE]
+      if (nrow(sset) < 2) next
+      col <- unname(cols[ind])
+      if (style == "spider") {
+        cx <- mean(sset$lon); cy <- mean(sset$lat)
+        for (i in seq_len(nrow(sset)))
+          m <- leaflet::addPolylines(m, lng = c(cx, sset$lon[i]),
+                                     lat = c(cy, sset$lat[i]),
+                                     color = col, weight = 2, opacity = 0.8)
+        m <- leaflet::addCircleMarkers(m, lng = cx, lat = cy, radius = 3.5,
+                                       color = col, fillColor = col, weight = 1,
+                                       fillOpacity = 1,
+                                       label = sprintf("%s centre", ind))
+      } else {
+        h <- gid_hull(sset$lon, sset$lat)
+        if (is.null(h)) next
+        m <- if (nrow(sset) == 2)
+          leaflet::addPolylines(m, lng = h$lon, lat = h$lat, color = col,
+                                weight = 2.5, opacity = 0.85, label = ind)
+        else
+          leaflet::addPolygons(m, lng = h$lon, lat = h$lat, color = col,
+                               weight = 2, opacity = 0.9, fillColor = col,
+                               fillOpacity = 0.18, label = ind)
+      }
+    }
+  }
+
+  lab <- sprintf("<b>%s</b><br/>%s%s", d$sample, d$animal,
+                 ifelse(d$n_samples > 1, sprintf(" (%d samples)", d$n_samples), ""))
+  leaflet::addCircleMarkers(
+    m, lng = d$lon, lat = d$lat, layerId = d$sample,
+    radius = ifelse(d$n_samples > 1, 7, 5),
+    color = "#33383d", weight = 1,
+    fillColor = unname(cols[d$animal]), fillOpacity = 0.85,
+    label = lapply(lab, htmltools::HTML),
+    popup = sprintf(
+      "<b>%s</b><br/>Individual: <b>%s</b><br/>Samples of this animal: %d%s%s",
+      d$sample, d$animal, d$n_samples,
+      ifelse(is.na(d$year), "", sprintf("<br/>Year: %s", d$year)),
+      ifelse(is.na(d$sex) | d$sex == "U", "",
+             sprintf("<br/>Sex: %s", ifelse(d$sex == "F", "Female", "Male")))))
+}
+
 #' A clean point map of the same thing the leaflet view is showing.
 #'
 #' Basemap tiles are deliberately absent: they are copyrighted raster images and
@@ -610,17 +752,6 @@ gid_map_server <- function(input, output, session, deps) {
   ## moment it appears, at the cost of a redraw when the colouring changes.
   output$geo_map <- leaflet::renderLeaflet({
     d <- shown(); req(nrow(d) > 0)
-    cols  <- pal()
-    style <- input$map_link_style %||% "none"
-    who   <- link_targets()
-
-    m <- leaflet::leaflet() |>
-      leaflet::addProviderTiles("Esri.WorldTopoMap", group = "Topographic") |>
-      leaflet::addProviderTiles("Esri.WorldImagery", group = "Satellite") |>
-      leaflet::addProviderTiles("CartoDB.Positron",  group = "Plain") |>
-      leaflet::addLayersControl(
-        baseGroups = c("Topographic", "Satellite", "Plain"),
-        options = leaflet::layersControlOptions(collapsed = TRUE))
 
     ## Hold the view the user has panned to, so switching model or linking does
     ## not throw them back to the full extent.
@@ -628,54 +759,16 @@ gid_map_server <- function(input, output, session, deps) {
     ## here would invalidate the render that just wrote it, forever.
     rv <- isolate(deps$restored_view())
     if (!is.null(rv)) {
-      ctr <- list(lng = rv$lng, lat = rv$lat); zm <- rv$zoom
+      view <- rv
       deps$restored_view(NULL)          # once only; the user owns the view after
     } else {
       ctr <- isolate(input$geo_map_center); zm <- isolate(input$geo_map_zoom)
-    }
-    m <- if (!is.null(ctr) && !is.null(zm))
-      leaflet::setView(m, ctr$lng, ctr$lat, zm)
-    else
-      leaflet::fitBounds(m, min(d$lon), min(d$lat), max(d$lon), max(d$lat))
-
-    ## links first, so the scats sit on top of them
-    if (length(who) && style != "none") {
-      for (ind in who) {
-        sset <- d[d$animal == ind, , drop = FALSE]
-        if (nrow(sset) < 2) next
-        col <- unname(cols[ind])
-        if (style == "spider") {
-          cx <- mean(sset$lon); cy <- mean(sset$lat)
-          for (i in seq_len(nrow(sset)))
-            m <- leaflet::addPolylines(m, lng = c(cx, sset$lon[i]),
-                                       lat = c(cy, sset$lat[i]),
-                                       color = col, weight = 2, opacity = 0.8)
-          m <- leaflet::addCircleMarkers(m, lng = cx, lat = cy, radius = 3.5,
-                                         color = col, fillColor = col, weight = 1,
-                                         fillOpacity = 1,
-                                         label = sprintf("%s centre", ind))
-        } else {
-          h <- gid_hull(sset$lon, sset$lat)
-          if (is.null(h)) next
-          m <- if (nrow(sset) == 2)
-            leaflet::addPolylines(m, lng = h$lon, lat = h$lat, color = col,
-                                  weight = 2.5, opacity = 0.85, label = ind)
-          else
-            leaflet::addPolygons(m, lng = h$lon, lat = h$lat, color = col,
-                                 weight = 2, opacity = 0.9, fillColor = col,
-                                 fillOpacity = 0.18, label = ind)
-        }
-      }
+      view <- if (!is.null(ctr) && !is.null(zm))
+        list(lng = ctr$lng, lat = ctr$lat, zoom = zm) else NULL
     }
 
-    lab <- sprintf("<b>%s</b><br/>%s%s", d$sample, d$animal,
-                   ifelse(d$n_samples > 1, sprintf(" (%d samples)", d$n_samples), ""))
-    leaflet::addCircleMarkers(
-      m, lng = d$lon, lat = d$lat, layerId = d$sample,
-      radius = ifelse(d$n_samples > 1, 7, 5),
-      color = "#33383d", weight = 1,
-      fillColor = unname(cols[d$animal]), fillOpacity = 0.85,
-      label = lapply(lab, htmltools::HTML))
+    gid_leaflet_map(d, pal(), link_targets(),
+                    input$map_link_style %||% "none", view = view)
   })
 
   ## If the map is already on screen when a project finishes restoring, no fresh
@@ -809,6 +902,36 @@ gid_map_server <- function(input, output, session, deps) {
   observeEvent(input$dl_map_pdf, save_map("pdf"))
   observeEvent(input$dl_map_jpg, save_map("jpg"))
 
+  ## The interactive map as one shareable file. Collaborators open it in any
+  ## browser and pan, zoom and click it exactly as here -- no genoID, no R, no
+  ## server. Basemap tiles still come from the internet; the samples, the links
+  ## and every popup are inside the file.
+  map_html <- function() {
+    d <- shown()
+    if (!nrow(d)) return(NULL)
+    ttl <- sprintf("%s \u00b7 %d samples, %d individuals",
+                   deps$source_name() %||% "genoID map",
+                   nrow(d), length(unique(d$animal)))
+    view <- if (!is.null(input$geo_map_center) && !is.null(input$geo_map_zoom))
+      list(lng = input$geo_map_center$lng, lat = input$geo_map_center$lat,
+           zoom = input$geo_map_zoom) else NULL
+    gid_widget_html(
+      gid_leaflet_map(d, pal(), link_targets(),
+                      input$map_link_style %||% "none", view = view), ttl)
+  }
+
+  observeEvent(input$dl_map_html, {
+    h <- tryCatch(map_html(), error = function(e) NULL)
+    if (is.null(h))
+      return(showNotification("Nothing to share yet - run the analysis first.",
+                              type = "warning"))
+    deps$send_file(sprintf("genoID_map_%s.html", format(Sys.Date())), h,
+                   type = "text/html;charset=utf-8")
+    showNotification(paste("Saved an interactive map. Send that one file to",
+                           "anyone - it opens in any browser."),
+                     type = "message", duration = 8)
+  })
+
   output$tbl_geo <- renderDT({
     d <- shown()
     d$margin <- signif(d$margin, 3)
@@ -816,4 +939,10 @@ gid_map_server <- function(input, output, session, deps) {
               "lat", "lon", "status", "margin")
     dt(d[, intersect(keep, names(d))])
   })
+
+  ## Handed back so the Download tab can bundle the mapped table and the
+  ## shareable map without reaching into this module's internals.
+  invisible(list(
+    table     = function() tryCatch(shown(),   error = function(e) NULL),
+    map_html  = function() tryCatch(map_html(), error = function(e) NULL)))
 }

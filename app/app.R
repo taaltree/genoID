@@ -478,6 +478,13 @@ ui <- page_navbar(
            "Both draw the points and links as a clean figure without the ",
            "basemap tiles \u2014 tiles are copyrighted images and cannot go into ",
            "a vector file."),
+      actionButton("dl_map_html", "Shareable interactive map",
+                   icon = icon("share-nodes"),
+                   class = "btn-sm btn-outline-primary w-100"),
+      hint("One HTML file holding this map, its points and every popup. Send ",
+           "it to a collaborator and they can pan, zoom and click it in any ",
+           "browser \u2014 no genoID and no R needed. Put it on any web host or ",
+           "shared drive and it becomes a link."),
       numericInput("map_fig_width", "Figure width (inches)", 9, 3, 20, 0.5),
       checkboxInput("map_fig_labels", "Name the linked animals on the figure", TRUE),
       hint("Turn the names off when many animals overlap.")),
@@ -1731,9 +1738,9 @@ server <- function(input, output, session) {
     send_file = send_file, run_count = run_count, res = res,
     prep = prep, restored_view = restored_view, pending_map = pending_map))
 
-  gid_map_server(input, output, session, list(
+  map_api <- gid_map_server(input, output, session, list(
     res = res, best = best, conf = conf, prep = prep, run_status = run_status,
-    send_file = send_file, run_count = run_count,
+    send_file = send_file, run_count = run_count, source_name = source_name,
     restored_view = restored_view, pending_map = pending_map))
 
   ## Every table's Download CSV button lands here. The table sends its output
@@ -1839,12 +1846,18 @@ server <- function(input, output, session) {
       individual_genotypes   = data.frame(individual = rownames(ic$genotypes),
                                           ic$genotypes))
     if (!is.null(best()$conflicts)) parts$cluster_conflicts <- best()$conflicts
+    ## the mapped samples, if coordinates were supplied
+    geo <- map_api$table()
+    if (!is.null(geo) && nrow(geo)) parts$scat_map <- geo
 
     zipped <- try({
       d <- file.path(tempdir(), paste0("genoID_", as.integer(Sys.time())))
       dir.create(d, showWarnings = FALSE, recursive = TRUE)
       for (nm in names(parts))
         utils::write.csv(parts[[nm]], file.path(d, paste0(nm, ".csv")), row.names = FALSE)
+      ## and the interactive map, so the zip is the whole shareable package
+      mh <- map_api$map_html()
+      if (!is.null(mh)) writeLines(mh, file.path(d, "interactive_map.html"))
       writeLines(params(), file.path(d, "settings.txt"))
       zf <- file.path(tempdir(), "genoID_results.zip")
       unlink(zf)

@@ -22,12 +22,23 @@ if your data are unpublished or covered by a data-sharing agreement.
 | **Panel power** | P(ID) and P(ID)<sub>sib</sub> per locus and cumulative, plus a per-sample version computed from the loci each sample actually has |
 | **Individuals** | Pick which method to identify with. Explains what it does, what it is good for and what to watch, links to its full derivation, then shows the answer, the evidence for every pair, and any cluster whose members do not all match each other |
 | **Sample map** | Which animal each sample belongs to, with a confidence measure per sample: how firmly it is held in its own cluster, what it nearly matched instead, and whether the assignment would survive a different cutoff. Downloadable as your capture history |
-| **Scat map** | Every sample plotted where it was collected, coloured by which animal it belongs to. Switch the colouring between methods to see which samples change hands, click a scat for its ID, its individual and its full genotype, and link an animal's samples with a spider plot or a convex hull. Filter by individual, sex or year, and save the figure as vector PDF or raster JPG |
+| **Scat map** | Every sample plotted where it was collected, coloured by which animal it belongs to. Switch the colouring between methods to see which samples change hands, click a scat for its ID, its individual and its full genotype, and link an animal's samples with a spider plot or a convex hull. Filter by individual, sex or year. Save it as vector PDF, raster JPG, or one self-contained HTML file a collaborator can open and manipulate |
 | **Method comparison** | All five methods on the same data at once, adjusted Rand index between them, the samples they disagree about, and a sensitivity grid across 18 combinations of settings |
 | **Methods** | Notation, a worked example carried through all five methods, the statistical model behind each one, and a glossary defining every column the app can show you |
 
 Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
+
+**Sharing a map.** *Shareable interactive map* writes the map you are looking
+at to a single HTML file — points, links, colours and every popup embedded.
+Send that file to a collaborator and they pan, zoom and click it in any
+browser, with no genoID and no R. Put it on any web host or shared drive and it
+becomes a link. Basemap tiles still come from the internet, so offline it draws
+your samples on a blank background. The same file, plus every table as CSV,
+is inside **Everything (zip)**.
+
+> Exported maps carry your real sample IDs and coordinates. Do not commit them
+> to a public repository — this one included.
 
 **Save your work.** *Save project* writes one JSON file holding your data and
 every setting you chose; *Open project* puts them all back. The data travels
@@ -213,6 +224,40 @@ for the zone and hemisphere, then converts to WGS84 for you.
 On a Format B file — one row per replicate — put the same position on every row
 of a sample; the app takes one position per sample. Samples with no position are
 left off the map and reported nowhere else, so a partly-mapped file is fine.
+
+### Failed samples: upload raw, do not pre-curate
+
+**Give it everything, including the samples where nothing amplified.** The
+call-rate filters in the sidebar are the curation step, and doing it in the app
+is better than doing it in Excel first, because the app shows you what was
+dropped and lets you move the line and watch the answer move.
+
+What happens if you *don't* filter is the reason it matters. A sample with no
+called loci matches nothing, so every method hands it its own individual —
+turning a plate of failed extractions into a row of phantom animals and
+inflating your population estimate. On one real 123-sample run, leaving the
+filter off took the count from 62 individuals to 81, purely from 19 samples
+that had no usable data.
+
+The default (`Minimum sample call rate` 0.5) is a sensible line, and the reason
+is visible in **Panel power &rarr; per-sample**, which reports P(ID)<sub>sib</sub>
+for each sample using only the loci that sample actually has:
+
+| Call rate | Median loci typed | Median P(ID)<sub>sib</sub> | Can it be told from a sibling? |
+|---|---|---|---|
+| 0&ndash;25% | 0 | 1.0 | No |
+| 25&ndash;50% | 10 | 0.028 | No |
+| 50&ndash;75% | 24 | 8 &times; 10<sup>&minus;5</sup> | Yes |
+| 75&ndash;100% | 33 | 3 &times; 10<sup>&minus;6</sup> | Yes |
+
+The cliff is sharp and it is a property of your panel, not a rule of thumb.
+Rather than trusting a blanket threshold, check the per-sample figure: anything
+below about P(ID)<sub>sib</sub> = 0.01 can be trusted to be distinguishable from
+a close relative, and a marginal sample above the cutoff can be judged on its
+own merits instead of being discarded by a round number.
+
+Samples that fail the filter are listed by name, not silently dropped, and they
+are excluded from allele-frequency estimation as well as from matching.
 
 ### What the app does for you
 

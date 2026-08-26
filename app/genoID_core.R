@@ -1012,11 +1012,19 @@ gid_method_genalex <- function(gt, enc = NULL, min_loci = 1,
   # GenAlEx counts MATCHING loci, not mismatching ones
   p$n_match <- p$n_compared - p$n_mismatch
 
-  # (1) the match-distribution table GenAlEx prints
-  dist <- as.data.frame(table(mismatching_loci = p$n_mismatch[p$n_compared >= min_loci]),
-                        stringsAsFactors = FALSE)
-  names(dist)[2] <- "n_pairs"
-  dist$mismatching_loci <- as.integer(dist$mismatching_loci)
+  # (1) the match-distribution table GenAlEx prints.
+  # A set of samples where nothing reached min_loci -- a plate of failed
+  # extractions, say -- leaves no pairs to tabulate at all, and table() then
+  # returns a one-column frame that the rename below used to crash on.
+  cmp  <- p$n_mismatch[p$n_compared >= min_loci]
+  dist <- if (!length(cmp)) {
+    data.frame(mismatching_loci = integer(0), n_pairs = integer(0))
+  } else {
+    d0 <- as.data.frame(table(mismatching_loci = cmp), stringsAsFactors = FALSE)
+    names(d0)[2] <- "n_pairs"
+    d0$mismatching_loci <- as.integer(d0$mismatching_loci)
+    d0
+  }
 
   # (2) exact matches = same individual; near matches flagged, not merged
   m    <- p[p$n_compared >= min_loci & p$n_mismatch == 0, , drop = FALSE]
