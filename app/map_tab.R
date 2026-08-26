@@ -294,6 +294,29 @@ gid_widget_html <- function(widget, title = "genoID map") {
     "</body>\n</html>\n")
 }
 
+#' A map marker as an inline SVG data URI.
+#'
+#' Shapes follow the pedigree convention every geneticist already reads without
+#' a legend: circle female, square male, diamond unknown. Colour still carries
+#' the individual, so shape and colour are independent channels and the map
+#' stays readable in greyscale or to a colour-blind reader.
+gid_marker_svg <- function(shape, fill, size = 17, stroke = "#33383d") {
+  h <- size / 2
+  r <- size * 0.33
+  body <- switch(
+    shape,
+    F = sprintf('<circle cx="%.2f" cy="%.2f" r="%.2f"', h, h, r),
+    M = sprintf('<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f"',
+                h - r * 0.9, h - r * 0.9, r * 1.8, r * 1.8),
+    sprintf('<polygon points="%.2f,%.2f %.2f,%.2f %.2f,%.2f %.2f,%.2f"',
+            h, h - r * 1.15, h + r * 1.15, h, h, h + r * 1.15, h - r * 1.15, h))
+  svg <- sprintf(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">%s fill="%s" stroke="%s" stroke-width="1.1"/></svg>',
+    size, size, size, size, body, fill, stroke)
+  sprintf("data:image/svg+xml;base64,%s",
+          jsonlite::base64_enc(charToRaw(svg)))
+}
+
 #' Build the interactive map. Shared by the on-screen view and the exported
 #' HTML file, so the two cannot drift apart.
 #'
@@ -345,11 +368,23 @@ gid_leaflet_map <- function(d, cols, who = character(0), style = "none",
 
   lab <- sprintf("<b>%s</b><br/>%s%s", d$sample, d$animal,
                  ifelse(d$n_samples > 1, sprintf(" (%d samples)", d$n_samples), ""))
-  leaflet::addCircleMarkers(
+
+  ## Shape carries sex, colour carries the individual. Icons are built once per
+  ## distinct shape/colour/size combination rather than once per sample, so a
+  ## few thousand scats do not become a few thousand data URIs.
+  sx  <- as.character(d$sex); sx[is.na(sx)] <- "U"
+  fil <- unname(cols[d$animal])
+  siz <- ifelse(d$n_samples > 1, 19L, 14L)
+  key <- paste(sx, fil, siz, sep = "|")
+  uni <- !duplicated(key)
+  lut <- setNames(vapply(which(uni), function(i)
+    gid_marker_svg(sx[i], fil[i], siz[i]), ""), key[uni])
+
+  leaflet::addMarkers(
     m, lng = d$lon, lat = d$lat, layerId = d$sample,
-    radius = ifelse(d$n_samples > 1, 7, 5),
-    color = "#33383d", weight = 1,
-    fillColor = unname(cols[d$animal]), fillOpacity = 0.85,
+    icon = leaflet::icons(iconUrl = unname(lut[key]),
+                          iconWidth = siz, iconHeight = siz,
+                          iconAnchorX = siz / 2, iconAnchorY = siz / 2),
     label = lapply(lab, htmltools::HTML),
     popup = sprintf(
       "<b>%s</b><br/>Individual: <b>%s</b><br/>Samples of this animal: %d%s%s",
@@ -399,11 +434,15 @@ gid_map_figure <- function(d, cols, who = character(0), style = "none",
   }
 
   d$fill <- unname(cols[d$animal])
+  ## 21 circle, 22 square, 23 diamond -- the same pedigree convention as the
+  ## interactive map, and all three take a fill and a border
+  sx <- as.character(d$sex); sx[is.na(sx)] <- "U"
+  d$shape <- c(F = 21L, M = 22L, U = 23L)[sx]
   p <- p +
     ggplot2::geom_point(data = d,
       ggplot2::aes(lon, lat, size = n_samples > 1),
-      shape = 21, fill = d$fill, colour = "#33383d", stroke = 0.3) +
-    ggplot2::scale_size_manual(values = c(`FALSE` = 1.7, `TRUE` = 2.9), guide = "none")
+      shape = d$shape, fill = d$fill, colour = "#33383d", stroke = 0.3) +
+    ggplot2::scale_size_manual(values = c(`FALSE` = 1.9, `TRUE` = 3.1), guide = "none")
 
   if (label_linked && length(who)) {
     cen <- do.call(rbind, lapply(who, function(i) {
@@ -436,6 +475,8 @@ gid_map_figure <- function(d, cols, who = character(0), style = "none",
     ggplot2::coord_fixed(ratio = asp, clip = "off") +
     ggplot2::labs(
       x = NULL, y = NULL,
+      caption = if (any(sx != "U"))
+        "Circle female \u00b7 square male \u00b7 diamond sex not called" else NULL,
       title = "Samples by individual",
       subtitle = sprintf("%d samples, %d individuals%s%s", nrow(d), n_ind,
                          if (nzchar(model)) paste0(" \u00b7 ", model) else "",
@@ -450,6 +491,7 @@ gid_map_figure <- function(d, cols, who = character(0), style = "none",
       axis.text = ggplot2::element_text(colour = "#6b7a8f", size = 7),
       plot.title = ggplot2::element_text(face = "bold", colour = "#1d3557", size = 12),
       plot.subtitle = ggplot2::element_text(colour = "#6b7a8f", size = 8.5),
+      plot.caption = ggplot2::element_text(colour = "#6b7a8f", size = 7.5, hjust = 0),
       plot.margin = ggplot2::margin(8, 12, 8, 8))
 }
 
@@ -536,7 +578,9 @@ gid_map_server <- function(input, output, session, deps) {
     d <- d[!is.na(d$lat) & !is.na(d$lon), , drop = FALSE]
     ## a replicate file repeats each sample; one position per sample is enough
     d <- d[!duplicated(d$sample), , drop = FALSE]
-    keep <- rownames(deps$res()$gt)
+    ## prep(), not res(): the analysis can now ask geo() for coordinates, and
+    ## depending on res() here would put the two reactives in a cycle.
+    keep <- rownames(deps$prep()$gt)
     d <- d[d$sample %in% keep, , drop = FALSE]
     if (!nrow(d)) NULL else d
   })
@@ -835,11 +879,19 @@ gid_map_server <- function(input, output, session, deps) {
     multi <- multi[order(-as.integer(n[multi]), multi)]
     if (!length(multi)) return(tags$p(class = "gid-hint",
       "No animal was sampled more than once under this model."))
+    shapes <- sort(unique(as.character(d$sex[!is.na(d$sex)])))
     tagList(
       tags$p(class = "gid-hint",
              sprintf("%d animals sampled more than once. %d seen once%s.",
                      length(multi), sum(d$n_samples == 1),
                      if (isTRUE(input$map_grey)) ", shown grey" else "")),
+      if (length(shapes) > 1) tags$div(
+        class = "gid-legend-row", style = "margin-bottom:.5rem;gap:.8rem",
+        lapply(shapes, function(k) tags$span(
+          class = "gid-legend-row", style = "gap:.3rem",
+          tags$img(src = gid_marker_svg(k, "#8fa3a6", 15), width = 15, height = 15),
+          tags$span(class = "gid-hint",
+                    switch(k, F = "female", M = "male", "sex not called"))))),
       tags$div(class = "gid-legend",
         lapply(multi, function(i) tags$div(
           class = "gid-legend-row",
@@ -944,5 +996,6 @@ gid_map_server <- function(input, output, session, deps) {
   ## shareable map without reaching into this module's internals.
   invisible(list(
     table     = function() tryCatch(shown(),   error = function(e) NULL),
+    coords    = function() tryCatch(geo(),     error = function(e) NULL),
     map_html  = function() tryCatch(map_html(), error = function(e) NULL)))
 }

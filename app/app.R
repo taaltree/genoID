@@ -346,6 +346,14 @@ ui <- page_navbar(
     ## hidden, so the comparison tab can still run all five.
     conditionalPanel(
       "input.method == 'probabilistic'",
+      conditionalPanel(
+        "output.has_coords == true",
+        checkboxInput("use_spatial", "Also use where samples were found", FALSE),
+        hint("Two scats close together are more likely to be one animal. This ",
+             "adds that as evidence, after Augustine et al. (2020). It helps ",
+             "when home ranges are small next to the area you sampled, and can ",
+             "mislead when they overlap heavily \u2014 check the diagnostics on ",
+             "the Individuals tab before trusting it.")),
       selectInput("kinship", "Compare against", selected = "full_sib",
                   choices = c("Full siblings (conservative)" = "full_sib",
                               "Half siblings" = "half_sib",
@@ -544,6 +552,7 @@ ui <- page_navbar(
     "Individuals", icon = icon("fingerprint"),
     uiOutput("method_header"),
     uiOutput("run_status_ind"),
+    uiOutput("spatial_diag"),
     uiOutput("power_warning"),
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
@@ -1134,6 +1143,20 @@ server <- function(input, output, session) {
       th <- gid_by_group(p$gt, p$grp, gid_method_threshold,
                          max_mismatch = input$max_mismatch, min_loci = input$min_loci,
                          linkage = input$linkage)
+      ## Spatial evidence, if asked for and if the file carries coordinates.
+      ## Applied only to the likelihood-ratio result: it is the one method with
+      ## a per-pair posterior for the distance term to multiply into.
+      spatial_note <- NULL
+      if (isTRUE(input$use_spatial)) {
+        cc <- try(map_api$coords(), silent = TRUE)
+        if (!inherits(cc, "try-error") && !is.null(cc) && nrow(cc) > 1) {
+          incProgress(0.05, detail = "spatial evidence")
+          lr2 <- try(gid_apply_spatial(lr, cc, post_cut = input$post_cut,
+                                       linkage = input$linkage), silent = TRUE)
+          if (!inherits(lr2, "try-error")) lr <- lr2
+          else spatial_note <- "Spatial evidence could not be calibrated; genetics only."
+        } else spatial_note <- "No usable coordinates, so spatial evidence was skipped."
+      }
       out <- list(exact = ex, threshold = th, probabilistic = lr)
       if (isTRUE(input$run_sethi) && length(input$sethi_rel)) {
         incProgress(0.15, detail = "Sethi et al. match calling")
@@ -1153,7 +1176,7 @@ server <- function(input, output, session) {
       }
       incProgress(0.1, detail = "comparing")
       ord <- c("exact", "threshold", "genalex", "sethi", "probabilistic")
-      list(methods = out[ord[ord %in% names(out)]],
+      list(methods = out[ord[ord %in% names(out)]], spatial_note = spatial_note,
            cmp = gid_compare_methods(out), gt = p$gt, grp = p$grp,
            sweep = gid_threshold_sweep(p$gt, max_k = 6, min_loci = input$min_loci,
                                        linkage = input$linkage))
@@ -1241,6 +1264,34 @@ server <- function(input, output, session) {
     NULL
   }
   output$run_status_ind <- renderUI(run_status())
+
+  ## What the spatial term actually did, so it is judged rather than trusted.
+  output$spatial_diag <- renderUI({
+    r <- tryCatch(res(), error = function(e) NULL); req(r)
+    if (!is.null(r$spatial_note))
+      return(tags$div(class = "gid-flag", tags$b("Spatial evidence: "), r$spatial_note))
+    sp <- r$methods$probabilistic$spatial
+    if (is.null(sp) || !identical(input$method, "probabilistic")) return(NULL)
+    if (!is.list(sp) || is.null(names(sp))) sp <- list(all = sp)
+    rows <- Filter(Negate(is.null), lapply(names(sp), function(g) {
+      a <- sp[[g]]
+      if (is.null(a)) return(NULL)
+      if (!isTRUE(a$applied))
+        return(tags$li(sprintf("%s: not applied \u2014 %s", g, a$note %||% "")))
+      tags$li(sprintf(
+        "%s: home-range scale %.1f km, from %d matched pairs. Matched pairs sit %.1f km apart on average, unrelated pairs %.1f km. %s",
+        g, a$sigma / 1000, a$n_matched, a$median_matched_m / 1000,
+        a$median_ruled_out_m / 1000,
+        if (a$median_ruled_out_m > 3 * a$median_matched_m)
+          "Well separated, so location is informative here."
+        else
+          "Not well separated \u2014 home ranges overlap too much for location to add much, and it may mislead."))
+    }))
+    if (!length(rows)) return(NULL)
+    tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
+             tags$b("Spatial evidence is switched on. "),
+             tags$ul(style = "margin:.4rem 0 0;padding-left:1.1rem", rows))
+  })
   output$run_status_cmp <- renderUI(run_status())
 
   output$power_warning <- renderUI({

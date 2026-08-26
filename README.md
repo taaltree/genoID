@@ -56,6 +56,51 @@ anywhere — the file is written and read in your browser.
 | **Likelihood ratio** | Explicit dropout / false-allele error model, tested against a stated alternative (unrelated, half sib, full sib, parent–offspring), returning a posterior probability per pair | **Recommended** |
 | **Sethi et al. (2016)** | Same likelihood, but divided by whichever relationship best explains the pair — so you don't pick one — and decided on evidence alone (Λ > 1) | **Recommended** |
 
+### Optional: where the sample was found
+
+Two scats a few hundred metres apart are more likely to be one animal than two
+scats twenty kilometres apart, because animals have home ranges. Augustine et
+al. ([2020, *PNAS*](https://www.pnas.org/doi/10.1073/pnas.2000247117)) turned
+that into the **genotype spatial partial identity model (gSPIM)**, which
+resolves identity, genotyping error and density together inside a spatial
+capture-recapture model fitted by MCMC — and recovered 157 fisher samples that
+had been discarded as unidentifiable.
+
+genoID does not implement gSPIM: that needs a detector array and an SCR design,
+which opportunistic scat collection does not have. What it implements is the
+pairwise part of the same idea, at the cost of one multiplication per pair:
+
+<p align="center">posterior odds = prior odds &times; LR(genetics) &times; LR(space)</p>
+
+where LR(space) = *f*<sub>same</sub>(*d*) / *f*<sub>diff</sub>(*d*). The
+numerator is a Rayleigh distribution — two draws from one home range of scale
+&sigma; — and the denominator is read straight off the pairs the genetics has
+already ruled out, so no assumption is made about the shape of the sampled area.
+&sigma; comes from the pairs the genetics has already matched. Both are
+estimated from the confident tails and applied only to the uncertain middle.
+
+**It is off by default, and the reason is in the numbers.** Twenty simulated
+replicates per row, scored against known truth:
+
+| Scenario | ARI, genetics | ARI, joint | Better | Worse | Same |
+|---|---|---|---|---|---|
+| 3% dropout, tight ranges | 0.999 | 1.000 | 1 | 0 | 19 |
+| 10% dropout, tight ranges | 0.999 | 1.000 | 1 | 0 | 19 |
+| **20% dropout, tight ranges** | 0.979 | **0.995** | **9** | 1 | 10 |
+| 20% dropout, high overlap | 0.979 | 0.980 | 3 | 3 | 14 |
+| 20% dropout, total overlap | 0.979 | 0.977 | 0 | 2 | 18 |
+
+Location earns its keep in exactly one situation: **when dropout is bad enough
+to make the genetics ambiguous *and* home ranges are small next to the area you
+sampled.** Where the genetics is already clean it changes nothing, and where
+home ranges overlap heavily it adds noise rather than information — the last row
+is a small net loss. Reproduce it with `Rscript spatial_evidence_test.R`.
+
+The Individuals tab reports the estimated home-range scale, how many pairs it
+was calibrated on, and how far apart matched and unrelated pairs actually sit,
+so you can see whether your data is in the regime where this helps before you
+believe it.
+
 The last two are the ones to report. Both attach a number to every pair instead
 of a yes/no, and both make the alternative hypothesis explicit — which, for
 pack-, pride-, or colony-living species, matters more than any threshold you can

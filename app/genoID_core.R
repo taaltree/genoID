@@ -1667,6 +1667,180 @@ gid_sample_power <- function(gt, pid_tab) {
 
 
 # =============================================================================
+# 9a. SPATIAL EVIDENCE FOR IDENTITY (a cheap stand-in for gSPIM)
+# =============================================================================
+#
+# Augustine et al. (2020, PNAS 117:17903) showed that where a sample was found
+# carries real information about who left it: two scats a few hundred metres
+# apart are far more likely to be one animal than two scats twenty kilometres
+# apart, because animals have home ranges. Their genotype spatial partial
+# identity model (gSPIM) folds this into a full spatial capture-recapture model
+# and resolves identity, genotyping error and density together by MCMC.
+#
+# That machinery needs a detector array and an SCR design. What follows keeps
+# only the part that answers "are these two samples the same animal", and costs
+# one multiplication per pair:
+#
+#   posterior odds = prior odds  x  LR(genetics)  x  LR(space)
+#
+# The spatial term is an ordinary likelihood ratio,
+#
+#   LR(space) = f_same(d) / f_diff(d),
+#
+# where d is the distance between the two samples.
+#
+#   f_same  two draws from one animal's home range. If locations are bivariate
+#           normal about an activity centre with scale sigma, their separation
+#           is bivariate normal with scale sigma*sqrt(2), so the distance is
+#           Rayleigh:  f_same(d) = d/(2 sigma^2) exp(-d^2 / (4 sigma^2)).
+#
+#   f_diff  the distance between samples from two DIFFERENT animals. This one is
+#           not modelled: it is read off the data, from the pairs the genetics
+#           has already ruled out. That matters, because for opportunistic
+#           collection the sampling footprint is irregular and any parametric
+#           guess at it would be wrong in a way that biases every pair.
+#
+# sigma likewise comes from the data: the spread of pairs the genetics has
+# already matched. Both quantities are therefore estimated from the confident
+# tails and applied only to the uncertain middle -- empirical Bayes, and it
+# should be described that way rather than as a fully Bayesian treatment.
+
+#' Great-circle-ish distance in metres between two lon/lat points.
+#'
+#' Equirectangular approximation. Within a study area it agrees with the proper
+#' haversine to a fraction of a percent, and it is vectorised and cheap.
+gid_dist_m <- function(lon1, lat1, lon2, lat2) {
+  lat0 <- (lat1 + lat2) / 2 * pi / 180
+  dx <- (lon2 - lon1) * 111320 * cos(lat0)
+  dy <- (lat2 - lat1) * 110540
+  sqrt(dx^2 + dy^2)
+}
+
+#' Add spatial evidence to a pairwise table from gid_method_lr().
+#'
+#' @param pairs   the $pairs frame, needing id1, id2, log10_LR, posterior_same
+#' @param coords  data.frame(sample, lon, lat)
+#' @param sigma   home-range scale in metres; NULL estimates it from the data
+#' @param post_cut what counts as a confident genetic match when calibrating
+#' @return pairs with dist_m, log10_LR_space, log10_LR_joint, posterior_joint,
+#'   plus attr "spatial" holding sigma, the sample sizes and whether it ran
+gid_spatial_evidence <- function(pairs, coords, sigma = NULL, post_cut = 0.999,
+                                 prior_same = NULL, min_matched = 5) {
+  stopifnot(all(c("id1", "id2", "log10_LR") %in% names(pairs)))
+  cx <- setNames(coords$lon, coords$sample)
+  cy <- setNames(coords$lat, coords$sample)
+  ok <- pairs$id1 %in% names(cx) & pairs$id2 %in% names(cx)
+
+  pairs$dist_m <- NA_real_
+  pairs$dist_m[ok] <- gid_dist_m(cx[pairs$id1[ok]], cy[pairs$id1[ok]],
+                                 cx[pairs$id2[ok]], cy[pairs$id2[ok]])
+
+  usable <- ok & is.finite(pairs$dist_m)
+  matched <- usable & pairs$posterior_same >= post_cut
+  ruled_out <- usable & pairs$posterior_same < 1e-6
+
+  ## sigma from the pairs the genetics already matched. The Rayleigh MLE for
+  ## scale sigma*sqrt(2) is sqrt(mean(d^2)/2), so sigma = sqrt(mean(d^2)/4).
+  est_sigma <- if (!is.null(sigma)) sigma else
+    if (sum(matched) >= min_matched)
+      sqrt(mean(pairs$dist_m[matched]^2, na.rm = TRUE) / 4) else NA_real_
+
+  if (!is.finite(est_sigma) || est_sigma <= 0 || sum(ruled_out) < 50) {
+    pairs$log10_LR_space <- 0
+    pairs$log10_LR_joint <- pairs$log10_LR
+    pairs$posterior_joint <- pairs$posterior_same
+    attr(pairs, "spatial") <- list(
+      applied = FALSE, sigma = est_sigma,
+      n_matched = sum(matched), n_ruled_out = sum(ruled_out),
+      note = "Too few confidently matched or confidently different pairs to calibrate.")
+    return(pairs)
+  }
+
+  ## f_same: Rayleigh with scale sigma*sqrt(2)
+  log_f_same <- function(d) log(d) - log(2 * est_sigma^2) - d^2 / (4 * est_sigma^2)
+
+  ## f_diff: read off the ruled-out pairs. A log-scale kernel keeps the density
+  ## positive and sane out in the tail, where a linear-scale KDE would go to
+  ## zero and hand any distant pair an absurd likelihood ratio.
+  dd <- pairs$dist_m[ruled_out]; dd <- dd[dd > 0]
+  kd <- stats::density(log(dd), bw = "SJ", n = 512)
+  log_f_diff <- function(d) {
+    lo <- log(pmax(d, 1))
+    ## density of d is density of log(d) divided by d
+    dens <- stats::approx(kd$x, kd$y, xout = lo, rule = 2)$y
+    log(pmax(dens, 1e-12)) - lo
+  }
+
+  lr <- rep(0, nrow(pairs))
+  lr[usable] <- (log_f_same(pmax(pairs$dist_m[usable], 1)) -
+                 log_f_diff(pairs$dist_m[usable])) / log(10)
+  ## A pair with no coordinates simply gets no spatial evidence, which is the
+  ## honest answer rather than a penalty.
+  lr[!usable] <- 0
+  ## Keep it from dominating: space is weaker evidence than a 34-locus genotype
+  ## and should never single-handedly force a call.
+  lr <- pmax(pmin(lr, 3), -3)
+
+  pairs$log10_LR_space <- lr
+  pairs$log10_LR_joint <- pairs$log10_LR + lr
+
+  pr <- if (is.null(prior_same)) {
+    ## same self-consistent prior gid_method_lr() uses: what fraction of pairs
+    ## the genetics alone already calls a match
+    max(mean(pairs$posterior_same >= post_cut, na.rm = TRUE), 1e-6)
+  } else prior_same
+  odds <- (pr / (1 - pr)) * 10^pairs$log10_LR_joint
+  pairs$posterior_joint <- odds / (1 + odds)
+
+  attr(pairs, "spatial") <- list(
+    applied = TRUE, sigma = est_sigma,
+    n_matched = sum(matched), n_ruled_out = sum(ruled_out),
+    median_matched_m = stats::median(pairs$dist_m[matched], na.rm = TRUE),
+    median_ruled_out_m = stats::median(dd),
+    prior_same = pr)
+  pairs
+}
+
+
+#' Re-resolve a likelihood-ratio result with spatial evidence folded in.
+#'
+#' Takes what gid_method_lr() or gid_by_group() produced and returns the same
+#' shape, with identity re-decided on the joint posterior. Groups are handled
+#' separately, because sigma and the between-animal distance distribution are
+#' properties of a population, not of a dataset.
+gid_apply_spatial <- function(result, coords, sigma = NULL, post_cut = 0.999,
+                              linkage = "single") {
+  one <- function(r, ids) {
+    if (is.null(r$pairs) || !nrow(r$pairs)) return(r)
+    sp <- gid_spatial_evidence(r$pairs, coords, sigma = sigma, post_cut = post_cut)
+    info <- attr(sp, "spatial")
+    r$pairs <- sp
+    r$spatial <- info
+    if (!isTRUE(info$applied)) return(r)
+    m  <- sp[sp$posterior_joint >= post_cut, c("id1", "id2"), drop = FALSE]
+    rs <- gid_resolve(m, ids, linkage)
+    r$assignment <- rs$assignment; r$conflicts <- rs$conflicts
+    r$n_conflict <- rs$n_conflict; r$matched_pairs <- m
+    r
+  }
+
+  if (is.null(result$by_group)) return(one(result, result$assignment$sample))
+
+  result$by_group <- lapply(result$by_group, function(e)
+    one(e, e$assignment$sample))
+  ## rebuild the combined view the app reads
+  asg <- do.call(rbind, lapply(names(result$by_group), function(g) {
+    a <- result$by_group[[g]]$assignment
+    a$individual <- paste0(g, "_", a$individual); a
+  }))
+  result$assignment <- asg
+  result$n_conflict <- sum(vapply(result$by_group, function(e) e$n_conflict %||% 0L, 0L))
+  result$spatial <- lapply(result$by_group, `[[`, "spatial")
+  result
+}
+
+
+# =============================================================================
 # 9b. METHOD -- SETHI ET AL. (2016) ERROR-TOLERANT MATCH CALLING
 # =============================================================================
 #
