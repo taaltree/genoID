@@ -243,6 +243,22 @@ ui <- page_navbar(
     .gid-flag{background:#fdf3ee;border-left:3px solid %s;padding:.55rem .8rem;margin:.4rem 0;
               font-size:.85rem;border-radius:0 4px 4px 0}
     .gid-ok{background:#eef5f0;border-left:3px solid #4a7c59}
+    .gid-advice{background:#fff;border:1px solid #e3e9ef;border-left:3px solid #1d3557;
+      border-radius:0 4px 4px 0;padding:.9rem 1.1rem;margin-bottom:1rem;
+      box-shadow:0 1px 3px rgba(29,53,87,.06)}
+    .gid-advice-head{margin-bottom:.55rem;font-size:.95rem}
+    .gid-advice-row{display:grid;grid-template-columns:7.2rem 1fr;gap:.9rem;
+      padding:.65rem 0;border-top:1px solid #eef2f6;align-items:start}
+    .gid-advice-title{font-weight:600;font-size:.92rem;color:#1d3557}
+    .gid-advice-why{font-size:.85rem;color:#4a6067;line-height:1.5;margin-top:.15rem}
+    .gid-advice-ev{font-size:.82rem;color:#6b7a8f;margin-top:.3rem;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    .gid-sev{display:inline-block;font-size:.62rem;font-weight:700;letter-spacing:.07em;
+      text-transform:uppercase;padding:.2em .55em;border-radius:2px;white-space:nowrap}
+    .gid-sev-high{background:#fdf3ee;color:#c1502e}
+    .gid-sev-medium{background:#f6eddc;color:#a8762a}
+    .gid-sev-low{background:#eef3f2;color:#6b7a8f}
+    @media (max-width:640px){.gid-advice-row{grid-template-columns:1fr;gap:.25rem}}
     .gid-label{font-weight:700;font-size:.78rem;letter-spacing:.05em;text-transform:uppercase;
                color:#6b7a8f;margin:.2rem 0 .4rem}
     .gid-legend{max-height:330px;overflow:auto}
@@ -552,6 +568,7 @@ ui <- page_navbar(
     "Individuals", icon = icon("fingerprint"),
     uiOutput("method_header"),
     uiOutput("run_status_ind"),
+    uiOutput("advice_card"),
     uiOutput("spatial_diag"),
     uiOutput("power_warning"),
     layout_columns(
@@ -635,6 +652,15 @@ ui <- page_navbar(
     "Method comparison", icon = icon("code-compare"),
     uiOutput("run_status_cmp"),
     card(card_header("How each method resolved the same data"), DTOutput("tbl_cmp")),
+    card(
+      card_header("Why the two recommended methods disagree"),
+      hint("Both use the same genotype likelihood, so a disagreement can only ",
+           "come from one of two places: the alternative each divides by, or ",
+           "the rule each uses to decide. Naming which, pair by pair, is the ",
+           "difference between an argument about a threshold and a sign that ",
+           "one model is asking the wrong question."),
+      uiOutput("disagree_summary"),
+      DTOutput("tbl_lr_sethi")),
     layout_columns(
       col_widths = c(6, 6),
       card(card_header("Agreement between methods (adjusted Rand index)"),
@@ -1271,6 +1297,147 @@ server <- function(input, output, session) {
         "calculated until you do \u2014 the other tabs update on their own."))
     NULL
   }
+  ## ---- what to change before the next run ---------------------------------
+  advice <- reactive({
+    r <- res(); req(r)
+    cal <- tryCatch({
+      tb <- calib()
+      g <- tb$group[which.max(tb$n_ids)]
+      x <- tb[tb$group == g, ]
+      attr(x, "max_posterior") <- x$max_post[1]
+      x
+    }, error = function(e) NULL)
+    gid_advise(
+      r,
+      settings = list(post_cut = input$post_cut, dropout = input$dropout,
+                      false_allele = input$false_allele, kinship = input$kinship,
+                      min_loci = input$min_loci, linkage = input$linkage,
+                      lambda_cut = input$lambda_cut,
+                      budget = input$err_budget %||% 1),
+      err_measured = err_est(),
+      calib = cal,
+      pid = tryCatch(pid(), error = function(e) NULL),
+      has_reps = isTRUE(has_reps()),
+      using_reps = isTRUE(has_reps()) && identical(input$rep_mode, "reps"))
+  })
+
+  output$advice_card <- renderUI({
+    a <- advice()
+    if (is.null(a) || !nrow(a))
+      return(tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
+        tags$b("Nothing to change. "),
+        "Every setting is consistent with what this data supports: the cutoff is ",
+        "reachable and on a plateau, the error rates match your replicates, and ",
+        "no cluster is held together by a chain."))
+    chip <- function(sev) tags$span(
+      class = paste0("gid-sev gid-sev-", sev),
+      switch(sev, high = "change this", medium = "worth changing", "consider"))
+    tags$div(
+      class = "gid-advice",
+      tags$div(class = "gid-advice-head",
+        tags$b(sprintf("%d thing%s to consider before your next run", nrow(a),
+                       if (nrow(a) == 1) "" else "s")),
+        tags$span(class = "gid-hint", style = "margin-left:.5rem",
+                  "Each one is drawn from your own data. Applying a change does ",
+                  "not re-run anything \u2014 press Identify individuals when ready.")),
+      lapply(seq_len(nrow(a)), function(i) tags$div(
+        class = "gid-advice-row",
+        tags$div(chip(as.character(a$severity[i]))),
+        tags$div(
+          tags$div(class = "gid-advice-title", a$title[i]),
+          tags$div(class = "gid-advice-why", a$why[i]),
+          if (!is.na(a$evidence[i]))
+            tags$div(class = "gid-advice-ev", a$evidence[i]),
+          if (!is.na(a$label[i])) tags$div(
+            style = "margin-top:.4rem",
+            actionButton(paste0("adv_", a$id[i]), a$label[i],
+                         class = "btn-sm btn-outline-primary"))))))
+  })
+
+  ## One handler per suggestion. They are a fixed vocabulary, so this stays
+  ## explicit rather than dispatching on a string.
+  apply_advice <- function(id) {
+    a <- advice(); req(a)
+    row <- a[a$id == id, ][1, ]
+    switch(row$param,
+      post_cut   = updateSliderInput(session, "post_cut", value = row$value),
+      kinship    = updateSelectInput(session, "kinship", selected = "full_sib"),
+      linkage    = updateRadioButtons(session, "linkage", selected = "complete"),
+      min_loci   = updateNumericInput(session, "min_loci", value = row$value),
+      lambda_cut = updateNumericInput(session, "lambda_cut", value = row$value),
+      rep_mode   = updateRadioButtons(session, "rep_mode", selected = "reps"),
+      error_rates = {
+        e <- err_est(); req(e)
+        d <- e$applied_dropout %||% e$dropout
+        f <- e$applied_false   %||% e$false_allele
+        updateSliderInput(session, "dropout", value = round(d, 4))
+        updateSliderInput(session, "false_allele", value = round(f, 4))
+      })
+    showNotification("Setting changed. Press Identify individuals to re-run.",
+                     type = "message", duration = 6)
+  }
+  for (.id in c("cutoff_unreachable", "cutoff_plateau", "error_rates", "use_reps",
+                "kinship", "linkage", "min_loci", "sethi_gap"))
+    local({
+      id <- .id
+      observeEvent(input[[paste0("adv_", id)]], apply_advice(id), ignoreInit = TRUE)
+    })
+
+  ## ---- why the two recommended methods disagree ---------------------------
+  lr_sethi <- reactive({
+    r <- res(); req(r)
+    lr <- r$methods$probabilistic; se <- r$methods$sethi
+    req(lr, se)
+    if (!is.null(lr$by_group)) {
+      do.call(rbind, lapply(names(lr$by_group), function(g) {
+        x <- gid_explain_disagreement(lr$by_group[[g]], se$by_group[[g]],
+                                      post_cut = input$post_cut,
+                                      lambda_cut = input$lambda_cut,
+                                      min_loci = input$min_loci)
+        if (is.null(x)) NULL else cbind(group = g, x)
+      }))
+    } else gid_explain_disagreement(lr, se, post_cut = input$post_cut,
+                                    lambda_cut = input$lambda_cut,
+                                    min_loci = input$min_loci)
+  })
+
+  output$disagree_summary <- renderUI({
+    r <- tryCatch(res(), error = function(e) NULL); req(r)
+    if (is.null(r$methods$sethi))
+      return(tags$div(class = "gid-flag",
+        "Sethi was not run, so there is nothing to compare. Tick it under ",
+        tags$b("Which methods to run"), " in the sidebar."))
+    d <- tryCatch(lr_sethi(), error = function(e) NULL)
+    n_lr <- length(unique(r$methods$probabilistic$assignment$individual))
+    n_se <- length(unique(r$methods$sethi$assignment$individual))
+    if (is.null(d) || !nrow(d))
+      return(tags$div(class = "gid-flag gid-ok",
+        tags$b(sprintf("The two agree on every pair: %d individuals each. ", n_lr)),
+        "Where the recommended methods agree, the answer does not depend on ",
+        "which decision rule you prefer, and that is worth saying in a paper."))
+    rule <- sum(grepl("^Decision rule", d$cause))
+    alt  <- nrow(d) - rule
+    tags$div(class = "gid-flag",
+      tags$b(sprintf("%d pair%s decided differently. Likelihood ratio: %d individuals. Sethi: %d.",
+                     nrow(d), if (nrow(d) == 1) "" else "s", n_lr, n_se)),
+      tags$ul(style = "margin:.45rem 0 0;padding-left:1.1rem",
+        if (rule) tags$li(sprintf(
+          "%d down to the decision rule: the same evidence, judged against a different bar. Argue about the threshold, not the model.",
+          rule)),
+        if (alt) tags$li(sprintf(
+          "%d down to the alternative hypothesis: the two are dividing by different relationships, so one of them is asking the wrong question of these pairs.",
+          alt))),
+      if (rule && !alt) tags$div(style = "margin-top:.4rem", class = "gid-hint",
+        "Every difference here is the threshold. The models are not in conflict."))
+  })
+
+  output$tbl_lr_sethi <- renderDT({
+    d <- lr_sethi()
+    if (is.null(d) || !nrow(d))
+      return(dt(data.frame(message = "The two methods agree on every pair.")))
+    dt(d)
+  })
+
   output$run_status_ind <- renderUI(run_status())
 
   ## What the spatial term actually did, so it is judged rather than trusted.

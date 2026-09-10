@@ -1601,6 +1601,225 @@ gid_recommend_cutoff <- function(tab, budget = 1, max_post = NULL) {
 }
 
 
+# =============================================================================
+# 11b. WHAT TO CHANGE BEFORE THE NEXT RUN
+# =============================================================================
+#
+# Every setting on this app has a defensible value, and none of them is
+# knowable before you have seen your own data. That is a bad position to put a
+# student in: they are asked to choose first and find out later. This inspects
+# a finished run and says what it would change and why, with the evidence from
+# their own data attached, so the second run is informed rather than guessed.
+#
+# Every suggestion carries the input it would change and the value it would set,
+# so the interface can offer to apply it. Nothing is applied automatically: the
+# point is to make the choice visible, not to make it invisibly.
+
+#' Inspect a completed run and return ranked, evidence-backed suggestions.
+#'
+#' @param res the list gid_by_group()/the app builds: $methods, $gt, $grp
+#' @param settings named list of the values currently in force
+#' @param err_measured optional list(dropout, false_allele) from replicates
+#' @param calib optional table from gid_calibrate_threshold() for the main group
+#' @param pid optional P(ID) table, for the kinship argument
+#' @return data.frame of suggestions, most urgent first
+gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
+                       pid = NULL, has_reps = FALSE, using_reps = FALSE) {
+  out <- list()
+  add <- function(id, severity, title, why, evidence = NA_character_,
+                  param = NA_character_, value = NA_real_, label = NA_character_)
+    out[[length(out) + 1L]] <<- data.frame(
+      id = id, severity = severity, title = title, why = why,
+      evidence = evidence, param = param, value = value, label = label,
+      stringsAsFactors = FALSE)
+
+  lr    <- res$methods$probabilistic
+  sethi <- res$methods$sethi
+  n_lr  <- if (!is.null(lr)) length(unique(lr$assignment$individual)) else NA_integer_
+
+  ## ---- 1. is the cutoff reachable at all? --------------------------------
+  if (!is.null(calib)) {
+    mx  <- attr(calib, "max_posterior") %||% calib$max_post[1]
+    rec <- gid_recommend_cutoff(calib, budget = settings$budget %||% 1,
+                                max_post = mx)
+    if (!is.null(mx) && is.finite(mx) && mx < settings$post_cut) {
+      add("cutoff_unreachable", "high",
+          "Lower the posterior cutoff: nothing can currently match",
+          paste("No pair in your data can reach the cutoff you set, so every",
+                "sample is being returned as its own animal. That is a fact",
+                "about the setting, not about your animals."),
+          sprintf("Best pair reaches %.4g; your cutoff is %s.", mx, settings$post_cut),
+          "post_cut", if (!is.null(rec) && !is.na(rec$cutoff)) rec$cutoff else NA_real_,
+          if (!is.null(rec) && !is.na(rec$cutoff)) sprintf("Use %s", signif(rec$cutoff, 6)))
+    } else if (!is.null(rec) && !is.na(rec$cutoff) &&
+               abs(rec$cutoff - settings$post_cut) > 1e-12) {
+      add("cutoff_plateau", "medium",
+          sprintf("Consider a cutoff of %s", signif(rec$cutoff, 6)),
+          paste("The recommended value sits in the middle of the widest run of",
+                "cutoffs that all give the same answer, so it is the value least",
+                "sensitive to your error rates being somewhat wrong."),
+          rec$note, "post_cut", rec$cutoff, sprintf("Use %s", signif(rec$cutoff, 6)))
+    }
+  }
+
+  ## ---- 2. are the error rates guesses? -----------------------------------
+  if (!is.null(err_measured) && is.finite(err_measured$dropout %||% NA)) {
+    d0 <- settings$dropout; f0 <- settings$false_allele
+    dm <- err_measured$dropout; fm <- err_measured$false_allele
+    off <- function(a, b) is.finite(a) && is.finite(b) &&
+      (a < b / 2 || a > b * 2) && abs(a - b) > 0.005
+    if (off(d0, dm) || off(f0, fm))
+      add("error_rates", "high",
+          "Use the error rates measured from your replicates",
+          paste("The rates in force are far from what your own PCR replicates",
+                "say. Understating dropout makes the model treat a dropped",
+                "allele as evidence of a different animal, which splits",
+                "individuals; overstating it flattens every posterior and can",
+                "make nothing match."),
+          sprintf("In force: dropout %.4f, false allele %.4f. Measured: %.4f and %.4f.",
+                  d0, f0, dm, fm),
+          "error_rates", NA_real_, "Apply measured rates")
+  }
+
+  ## ---- 3. replicates on the table but not on the plate -------------------
+  if (isTRUE(has_reps) && !isTRUE(using_reps))
+    add("use_reps", "high",
+        "Analyse the PCR replicates directly",
+        paste("Your file holds several reactions per sample, but the analysis is",
+              "running on one collapsed genotype each. Conditioning on every",
+              "reaction keeps the information a consensus throws away -- most",
+              "importantly, which calls were shaky."),
+        "The file has more than one row per sample.",
+        "rep_mode", NA_real_, "Use replicates")
+
+  ## ---- 4. an unrelated null in a population with relatives ---------------
+  if (identical(settings$kinship, "unrelated")) {
+    ev <- if (!is.null(pid) && nrow(pid))
+      sprintf("Over this panel P(ID) is %.3g but P(ID)sib is %.3g, a factor of %.0f.",
+              prod(pid$pid), prod(pid$pid_sib), prod(pid$pid_sib) / prod(pid$pid))
+    else NA_character_
+    add("kinship", "medium",
+        "Test against full siblings, not unrelated animals",
+        paste("An unrelated alternative asks whether two samples are more alike",
+              "than two random animals. In a wolf pack, or any group-living",
+              "species, the real competitor is a sibling, which shares far more",
+              "of its genome. Against the wrong alternative the evidence for a",
+              "match is overstated and true siblings get merged into one animal."),
+        ev, "kinship", NA_real_, "Use full siblings")
+  }
+
+  ## ---- 5. clusters held together by a chain ------------------------------
+  nc <- if (!is.null(lr)) lr$n_conflict %||% 0L else 0L
+  if (nc > 0 && identical(settings$linkage, "single"))
+    add("linkage", "medium",
+        sprintf("%d cluster%s not internally consistent", nc, if (nc == 1) " is" else "s are"),
+        paste("Under single linkage, A joins B and B joins C, so A and C end up",
+              "the same animal even when they do not match each other. Complete",
+              "linkage requires every pair inside a cluster to match, which is",
+              "the stricter and usually the safer reading."),
+        sprintf("%d cluster%s contain a pair that failed to match.",
+                nc, if (nc == 1) "" else "s"),
+        "linkage", NA_real_, "Use complete linkage")
+
+  ## ---- 6. matches resting on very few loci -------------------------------
+  if (!is.null(lr) && !is.null(lr$matched_pairs) && nrow(lr$matched_pairs) &&
+      !is.null(lr$matched_pairs$n_compared)) {
+    thin <- sum(lr$matched_pairs$n_compared < settings$min_loci * 1.3)
+    if (thin > 0 && settings$min_loci < ncol(res$gt) * 0.6)
+      add("min_loci", "low",
+          "Consider requiring more shared loci per pair",
+          paste("Some matches rest on barely more loci than your minimum. A pair",
+                "compared on few loci can look identical by chance, and those",
+                "are the merges most likely to be wrong."),
+          sprintf("%d accepted pair%s compared on fewer than %d loci, of %d in the panel.",
+                  thin, if (thin == 1) "" else "s",
+                  ceiling(settings$min_loci * 1.3), ncol(res$gt)),
+          "min_loci", ceiling(ncol(res$gt) * 0.5),
+          sprintf("Require %d loci", ceiling(ncol(res$gt) * 0.5)))
+  }
+
+  ## ---- 7. Sethi and the likelihood ratio disagreeing --------------------
+  if (!is.null(sethi) && !is.null(lr)) {
+    n_se <- length(unique(sethi$assignment$individual))
+    if (is.finite(n_lr) && abs(n_se - n_lr) >= max(2, 0.03 * n_lr)) {
+      marginal <- if (!is.null(sethi$pairs))
+        sum(sethi$pairs$log10_lambda > 0 & sethi$pairs$log10_lambda < 1 &
+            sethi$pairs$n_compared >= settings$min_loci, na.rm = TRUE) else NA
+      add("sethi_gap", "low",
+          sprintf("Sethi returns %d individuals, the likelihood ratio %d", n_se, n_lr),
+          paste("The two use the same likelihood and differ only in the decision",
+                "rule. Sethi accepts any pair whose evidence merely favours a",
+                "match; the likelihood ratio requires a stated posterior. Raising",
+                "lambda is the way to make Sethi as cautious as the cutoff makes",
+                "the likelihood ratio."),
+          if (is.finite(marginal))
+            sprintf("%d pair%s sit between lambda of 1 and 10 -- accepted by Sethi, and the ones a higher lambda would drop.",
+                    marginal, if (marginal == 1) "" else "s") else NA_character_,
+          "lambda_cut", 10, "Raise lambda to 10")
+    }
+  }
+
+  if (!length(out)) return(NULL)
+  res_df <- do.call(rbind, out)
+  res_df$severity <- factor(res_df$severity, levels = c("high", "medium", "low"))
+  res_df[order(res_df$severity), ]
+}
+
+
+#' Why do the likelihood ratio and Sethi disagree about a pair?
+#'
+#' Both use the same genotype likelihood. They differ in two places, and every
+#' disagreement traces to one of them:
+#'
+#'   the alternative -- the likelihood ratio divides by one relationship you
+#'     nominate; Sethi divides by whichever of several best explains the pair,
+#'     which is never a weaker denominator and so never a larger ratio.
+#'   the decision rule -- Sethi accepts on evidence alone (lambda > 1); the
+#'     likelihood ratio folds in a prior and demands a posterior.
+#'
+#' Naming the cause per pair turns "the methods disagree" into something a
+#' student can act on, because the two causes call for opposite responses: a
+#' decision-rule difference is a threshold to argue about, while an alternative
+#' difference means one of the two models is asking the wrong question.
+gid_explain_disagreement <- function(lr, sethi, post_cut = 0.999,
+                                     lambda_cut = 1, min_loci = 15) {
+  if (is.null(lr$pairs) || is.null(sethi$pairs)) return(NULL)
+  a <- lr$pairs; b <- sethi$pairs
+  key <- function(x) paste(pmin(x$id1, x$id2), pmax(x$id1, x$id2), sep = "\r")
+  a$k <- key(a); b$k <- key(b)
+  m <- merge(a[, c("k", "id1", "id2", "n_compared", "log10_LR", "posterior_same")],
+             b[, c("k", "log10_lambda", "best_alternative")], by = "k")
+  m <- m[m$n_compared >= min_loci, , drop = FALSE]
+  if (!nrow(m)) return(NULL)
+
+  m$lr_match    <- m$posterior_same >= post_cut
+  m$sethi_match <- m$log10_lambda > log10(lambda_cut)
+  d <- m[m$lr_match != m$sethi_match, , drop = FALSE]
+  if (!nrow(d)) return(NULL)
+
+  ## A pair Sethi takes and the likelihood ratio does not is a threshold
+  ## argument whenever the genetic evidence agreed; where the two ratios
+  ## themselves diverge, the alternative is doing the work.
+  gap <- d$log10_LR - d$log10_lambda
+  d$cause <- ifelse(
+    d$sethi_match & !d$lr_match,
+    ifelse(gap > 0.5,
+           "Sethi's alternative is stronger: some relationship explains this pair better than the one you nominated",
+           "Decision rule: evidence favours a match but not enough to clear your posterior cutoff"),
+    ifelse(gap < -0.5,
+           "Your nominated alternative is weaker than Sethi's best, so the likelihood ratio is more generous here",
+           "Decision rule: clears your posterior cutoff but the evidence is not decisive on its own"))
+  d$taken_by <- ifelse(d$sethi_match, "Sethi only", "Likelihood ratio only")
+  d <- d[order(-abs(gap)), ]
+  d$log10_LR      <- round(d$log10_LR, 2)
+  d$log10_lambda  <- round(d$log10_lambda, 2)
+  d$posterior_same <- signif(d$posterior_same, 4)
+  rownames(d) <- NULL
+  d[, c("id1", "id2", "n_compared", "log10_LR", "posterior_same",
+        "log10_lambda", "best_alternative", "taken_by", "cause")]
+}
+
+
 #' How safe is each sample's assignment?
 #'
 #' A list of individuals is only as trustworthy as its shakiest sample, and the

@@ -24,3 +24,6 @@ report/
 *.Rproj
 _site/
 docs/
+
+# deliverables built for the lab; may contain project specifics
+reports/
