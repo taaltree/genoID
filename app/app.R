@@ -448,9 +448,15 @@ ui <- page_navbar(
              "across the board cannot drag otherwise good samples below the line."),
         checkboxInput("drop_flagged", "Treat quality-flagged calls as missing", FALSE),
         hint("Cells like ", tags$code("CT*"), " carry a flag from your genotyping ",
-             "pipeline. By default the flag is stripped and the call kept. Ticking ",
-             "this discards those calls instead, which is what the flag is for if ",
-             "it means \u201clow confidence\u201d."),
+             "pipeline. By default the flag is stripped and the call kept."),
+
+        checkboxInput("drop_mixtures", "Exclude samples that look like two animals", FALSE),
+        numericInput("mix_cut", "Heterozygosity excess to call a mixture", 0.18, 0, 1, 0.01),
+        hint("A scat holding DNA from two animals reads heterozygous wherever ",
+             "they differ, so it carries too many heterozygous loci and gets ",
+             "reported as a new animal. Excess is observed minus expected ",
+             "heterozygosity; 0.18 is the threshold in Eriksson et al. (2026). ",
+             "See the mixture card on Data & QC before switching this on."),
         radioButtons("linkage", "Cluster rule",
                      c("Single linkage (transitive)" = "single",
                        "Complete linkage (all pairs must match)" = "complete"),
@@ -552,6 +558,19 @@ ui <- page_navbar(
     layout_columns(
       col_widths = c(12),
       card(card_header("Data checks"), uiOutput("flags"))
+    ),
+    card(
+      card_header("Samples that may hold two animals"),
+      hint("A scat carrying DNA from two animals reads heterozygous wherever ",
+           "they differ, so it shows more heterozygous loci than any real ",
+           "individual should \u2014 and, being a genotype nobody has, it is ",
+           "reported as a new animal. After Eriksson et al. (2026), ",
+           tags$i("Mol Ecol Resour"), " 26:e70164."),
+      uiOutput("mix_summary"),
+      layout_columns(
+        col_widths = c(7, 5),
+        plotOutput("plot_mixture", height = 300),
+        DTOutput("tbl_mixture"))
     ),
     layout_columns(
       col_widths = c(7, 5),
@@ -1068,6 +1087,25 @@ server <- function(input, output, session) {
     use_reps <- isTRUE(has_reps()) && identical(input$rep_mode, "reps") &&
                 nzchar(input$rep_col %||% "")
 
+    ## Two animals in one scat genotype as a blend of both, and because that
+    ## blend is a genotype nobody has, it is reported as a new animal. Checked
+    ## on the filtered matrix; dropped only if asked, since whether a flagged
+    ## sample is a mixture or just a heterozygous animal is the user's call.
+    mix_step <- function(g) {
+      none <- list(gt = g, mixture = NULL, dropped = character(0))
+      if (nrow(g) < 10) return(none)
+      mxt <- try(gid_mixture_check(
+        g, alpha = 0.05,
+        excess_cut = if (is.na(input$mix_cut %||% NA)) NA_real_ else input$mix_cut,
+        min_loci = max(10, input$min_loci %||% 10)), silent = TRUE)
+      if (inherits(mxt, "try-error")) return(none)
+      bad <- mxt$sample[mxt$flag == "possible mixture"]
+      if (isTRUE(input$drop_mixtures) && length(bad) && nrow(g) - length(bad) >= 2)
+        list(gt = g[setdiff(rownames(g), bad), , drop = FALSE],
+             mixture = mxt, dropped = bad)
+      else list(gt = g, mixture = mxt, dropped = character(0))
+    }
+
     ## ---- replicate route: several rows per sample, one genotype per sample
     if (isTRUE(has_reps()) && nzchar(input$rep_col %||% "")) {
       lab  <- as.character(df[[input$rep_col]])
@@ -1092,8 +1130,10 @@ server <- function(input, output, session) {
         need(ncol(f$gt) >= 1, "No loci survive the call-rate filter."))
       if (!is.null(reps))
         reps$gt <- reps$gt[, colnames(f$gt), drop = FALSE]
-      return(list(gt = f$gt, grp = grp[rownames(f$gt)], raw_gt = gt, reps = reps,
+      mx <- mix_step(f$gt)
+      return(list(gt = mx$gt, grp = grp[rownames(mx$gt)], raw_gt = gt, reps = reps,
                   dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples,
+                  mixture = mx$mixture, dropped_mixtures = mx$dropped,
                   df = df, n_reps = length(rsm) / nrow(gt)))
     }
 
@@ -1114,8 +1154,10 @@ server <- function(input, output, session) {
                   "Fewer than two samples survive the call-rate filters. Lower them in the sidebar."),
              need(ncol(f$gt) >= 1,
                   "No loci survive the call-rate filter. Lower it in the sidebar."))
-    list(gt = f$gt, grp = grp[rownames(f$gt)], raw_gt = gt, reps = NULL,
-         dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples, df = df)
+    mx <- mix_step(f$gt)
+    list(gt = mx$gt, grp = grp[rownames(mx$gt)], raw_gt = gt, reps = NULL,
+         dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples,
+         mixture = mx$mixture, dropped_mixtures = mx$dropped, df = df)
   })
 
   ## ---------------------------------------------------------------- QC panel
@@ -1195,6 +1237,73 @@ server <- function(input, output, session) {
 
     if (!length(f)) f <- list(ok("No structural problems found in the uploaded table."))
     tagList(f)
+  })
+
+  ## ---- samples that may be two animals mixed -------------------------------
+  output$mix_summary <- renderUI({
+    p <- prep(); req(p)
+    m <- p$mixture
+    if (is.null(m)) return(tags$p(class = "gid-hint",
+      "Too few samples to test. The check needs at least ten."))
+    n_test <- sum(m$flag != "not tested")
+    n_bad  <- sum(m$flag == "possible mixture")
+    n_skip <- sum(m$flag == "not tested")
+    skip_note <- if (n_skip) tags$div(class = "gid-hint", style = "margin-top:.4rem",
+      sprintf(paste("%d samples were not tested: they are called at under 75%% of the",
+                    "panel, and a patchy genotype has a noisy heterozygosity that clears",
+                    "any fixed threshold by chance. Eriksson et al. required 77%% before",
+                    "analysing anything, for this reason."), n_skip))
+    if (!n_bad) return(tags$div(class = "gid-flag gid-ok",
+      tags$b("No sample looks like a mixture. "),
+      sprintf("Across %d tested samples the largest heterozygosity excess is %.3f, under the %s threshold.",
+              n_test, max(m$excess, na.rm = TRUE), input$mix_cut),
+      skip_note))
+    tags$div(
+      class = "gid-flag",
+      tags$b(sprintf("%d of %d samples carry more heterozygous loci than one animal should. ",
+                     n_bad, n_test)),
+      "Each is either a genuinely heterozygous animal or two animals in one ",
+      "sample. The second kind is the dangerous one: it becomes an individual ",
+      "that does not exist and inflates your count.",
+      tags$div(style = "margin-top:.4rem",
+        if (length(p$dropped_mixtures))
+          sprintf("These %d are currently excluded from the analysis.", length(p$dropped_mixtures))
+        else tagList("They are ", tags$b("included"), " right now. Tick ",
+                     tags$b("Exclude samples that look like two animals"),
+                     " in the sidebar to drop them and see how much the count moves.")),
+      tags$div(class = "gid-hint", style = "margin-top:.4rem",
+        sprintf("%d flagged by the published 0.18 excess threshold, %d by a test that also accounts for how many loci the sample has. ",
+                sum(m$by_excess, na.rm = TRUE), sum(m$by_test, na.rm = TRUE)),
+        "The test is the stricter of the two. An even two-way mixture is the ",
+        "case that slips through either way: on simulated mixtures this caught ",
+        "17 of 20, and the misses were mostly lopsided ones that simply ",
+        "genotype as the dominant animal and so introduce nobody new."),
+      skip_note)
+  })
+
+  output$tbl_mixture <- renderDT({
+    p <- prep(); req(p); m <- p$mixture
+    if (is.null(m)) return(dt(data.frame(message = "Not enough samples to test.")))
+    x <- m[m$flag != "not tested",
+           c("sample", "n_loci", "Ho", "He", "excess", "q", "by_test", "by_excess", "flag")]
+    x$Ho <- round(x$Ho, 3); x$He <- round(x$He, 3)
+    x$excess <- round(x$excess, 3); x$q <- signif(x$q, 3)
+    dt(x)
+  })
+
+  output$plot_mixture <- renderPlot({
+    p <- prep(); req(p); m <- p$mixture; req(m)
+    x <- m[!is.na(m$excess), ]
+    cut <- if (is.na(input$mix_cut %||% NA)) NA_real_ else input$mix_cut
+    ggplot(x, aes(excess, fill = flag)) +
+      geom_histogram(bins = 40, colour = "white", linewidth = 0.2) +
+      {if (!is.na(cut)) geom_vline(xintercept = cut, linetype = 2, colour = ACCENT)} +
+      scale_fill_manual(values = c("single individual" = INK,
+                                   "possible mixture" = ACCENT), name = NULL) +
+      labs(x = "Heterozygosity excess (observed minus expected)", y = "Samples",
+           subtitle = paste("One animal sits near zero. A blend of two sits to the right,",
+                            "\nbecause the two differ at many loci and every difference reads heterozygous.")) +
+      theme_gid()
   })
 
   output$tbl_locus <- renderDT({ p <- prep(); req(p)

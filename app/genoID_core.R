@@ -1956,6 +1956,131 @@ gid_explain_disagreement <- function(lr, sethi, post_cut = 0.999,
 }
 
 
+# =============================================================================
+# 11c. MIXED SAMPLES: TWO ANIMALS IN ONE SCAT
+# =============================================================================
+#
+# A scat holding DNA from two animals genotypes as a blend of both. Wherever the
+# two differ, the blend reads heterozygous, so the sample carries more
+# heterozygous loci than any real individual should -- and, being a genotype
+# nobody has, it is reported as a new animal. For a group-living species that is
+# the worst kind of error: it inflates the count with animals that do not exist.
+#
+# Eriksson et al. (2026, Mol Ecol Resour 26:e70164) quantify this for prey
+# genotyped from carnivore scats and filter on heterozygosity excess, Ho - He.
+# They set the threshold just above the largest excess seen among known single
+# individuals (0.13, so a cutoff of 0.18), which caught all but four of 24
+# artificial mixtures; three of those were dominated by one individual and gave
+# that individual's genotype, and one 50/50 mixture became a false individual.
+#
+# Two changes here. First, He is computed over the loci each sample actually
+# has, not as one panel-wide average, because a sample typed at 12 loci and one
+# typed at 34 are not comparable on a flat scale. Second, the flag comes from a
+# test rather than a fixed number: under a single individual the count of
+# heterozygous loci is Poisson-binomial with per-locus probabilities He_l, so a
+# one-sided tail probability says how surprising that many hets is GIVEN how
+# many loci the sample has. A 12-locus sample has to be far more extreme than a
+# 34-locus one to earn the same p-value, which a flat cutoff cannot express.
+#
+# Allele frequencies are re-estimated once with the flagged samples excluded,
+# because mixtures drag frequencies toward 0.5 and inflate He, which hides the
+# very thing being looked for.
+
+#' Exact upper tail of a Poisson-binomial: P(X >= k) for independent Bernoulli
+#' trials with differing probabilities. Convolution, which is exact and fast at
+#' the panel sizes involved.
+gid_pbinom_upper <- function(probs, k) {
+  probs <- probs[is.finite(probs)]
+  n <- length(probs)
+  if (!n) return(NA_real_)
+  if (k <= 0) return(1)
+  if (k > n) return(0)
+  dist <- c(1, numeric(n))
+  for (p in probs) {
+    keep <- dist
+    dist <- c(0, keep[-(n + 1)]) * p + keep * (1 - p)
+  }
+  min(1, max(0, sum(dist[(k + 1):(n + 1)])))
+}
+
+#' Flag samples that look like two animals mixed together.
+#'
+#' @param gt genotype matrix, one row per sample
+#' @param freqs optional allele frequencies; estimated from gt when absent
+#' @param alpha false-discovery rate for the heterozygosity test
+#' @param excess_cut also flag anything above this raw Ho - He, as in Eriksson
+#'   et al.; NA to rely on the test alone
+#' @param min_loci samples typed at fewer loci than this are not tested, since
+#'   the question cannot be answered from a handful of calls
+#' @param min_call samples called at less than this fraction of the panel are
+#'   not tested either. This matters more than it sounds. Allelic dropout
+#'   lowers heterozygosity and raises missingness, so a poorly typed sample has
+#'   a noisy Ho that clears a fixed excess threshold by chance: on a demo
+#'   containing no mixtures at all, every false positive was a sample with 21
+#'   of 42 loci. Eriksson et al. required 24 of 31 loci (77%) before analysing
+#'   anything, and that bar is doing real work -- on one real dataset the
+#'   apparent mixture rate fell from 11.6% to 3.6% once it was applied.
+#' @return one row per sample: n_loci, Ho, He, excess, p, q, missing, and flag,
+#'   plus by_test and by_excess showing which criterion fired
+gid_mixture_check <- function(gt, freqs = NULL, alpha = 0.05, excess_cut = 0.18,
+                              min_loci = 10, min_call = 0.75, refine = TRUE) {
+  stopifnot(is.matrix(gt))
+  is_het <- function(z) {
+    a <- strsplit(z, "/", fixed = TRUE)
+    vapply(a, function(x) length(x) == 2L && x[1] != x[2], TRUE)
+  }
+
+  one_pass <- function(fr) {
+    he_l <- vapply(colnames(gt), function(L) {
+      p <- fr[[L]]
+      if (is.null(p) || !length(p)) NA_real_ else 1 - sum(p^2)
+    }, 0)
+    do.call(rbind, lapply(rownames(gt), function(s) {
+      z  <- gt[s, ]
+      ok <- !is.na(z) & is.finite(he_l)
+      n  <- sum(ok)
+      if (n < min_loci || n < min_call * ncol(gt))
+        return(data.frame(sample = s, n_loci = n, Ho = NA_real_, He = NA_real_,
+                          excess = NA_real_, p = NA_real_, stringsAsFactors = FALSE))
+      h   <- sum(is_het(z[ok]))
+      hes <- he_l[ok]
+      data.frame(sample = s, n_loci = n, Ho = h / n, He = mean(hes),
+                 excess = h / n - mean(hes),
+                 p = gid_pbinom_upper(hes, h),
+                 stringsAsFactors = FALSE)
+    }))
+  }
+
+  if (is.null(freqs)) freqs <- gid_allele_freq(gt)
+  res <- one_pass(freqs)
+
+  ## Mixtures push allele frequencies toward even, which raises He and hides
+  ## them. Re-estimate once without the samples the first pass suspects.
+  if (isTRUE(refine)) {
+    q0    <- stats::p.adjust(res$p, method = "BH")
+    susp  <- !is.na(q0) & q0 < alpha
+    clean <- res$sample[!susp]
+    if (length(clean) >= 10 && any(susp))
+      res <- one_pass(gid_allele_freq(gt[clean, , drop = FALSE]))
+  }
+
+  res$q <- stats::p.adjust(res$p, method = "BH")
+  res$missing <- 1 - res$n_loci / ncol(gt)
+  ## Both criteria are reported rather than merged away. The test controls the
+  ## false-discovery rate across every sample and so is strict; the fixed
+  ## threshold is the published one, calibrated by Eriksson et al. to a 1.73%
+  ## false-positive rate, and catches more. They disagree, and which to believe
+  ## depends on whether a missed mixture or a wasted re-check costs more.
+  res$by_test   <- !is.na(res$q) & res$q < alpha
+  res$by_excess <- !is.na(res$excess) & !is.na(excess_cut) & res$excess >= excess_cut
+  res$flag <- ifelse(is.na(res$p), "not tested",
+                     ifelse(res$by_test | res$by_excess,
+                            "possible mixture", "single individual"))
+  attr(res, "min_call") <- min_call
+  res[order(-res$excess, res$q), ]
+}
+
+
 #' How safe is each sample's assignment?
 #'
 #' A list of individuals is only as trustworthy as its shakiest sample, and the
