@@ -433,6 +433,11 @@ ui <- page_navbar(
         numericInput("min_loci", "Minimum loci compared per pair", 15, 1, 500, 1),
         numericInput("min_sample_call", "Minimum sample call rate", 0.5, 0, 1, 0.05),
         numericInput("min_locus_call", "Minimum locus call rate", 0.25, 0, 1, 0.05),
+        checkboxInput("drop_flagged", "Treat quality-flagged calls as missing", FALSE),
+        hint("Cells like ", tags$code("CT*"), " carry a flag from your genotyping ",
+             "pipeline. By default the flag is stripped and the call kept. Ticking ",
+             "this discards those calls instead, which is what the flag is for if ",
+             "it means \u201clow confidence\u201d."),
         radioButtons("linkage", "Cluster rule",
                      c("Single linkage (transitive)" = "single",
                        "Complete linkage (all pairs must match)" = "complete"),
@@ -905,7 +910,8 @@ server <- function(input, output, session) {
     ## gid_matrix() drops unusable ids itself, so the parallel vector of sample
     ## names has to be taken from the same filtered frame or the two misalign.
     list(gt = gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(),
-                         sep = gid_guess_sep(df, exclude = input$id_col)),
+                         sep = gid_guess_sep(df, exclude = input$id_col),
+                         strip_flags = !isTRUE(input$drop_flagged)),
          sample = as.character(df[[input$id_col]])[keep])
   })
 
@@ -1048,7 +1054,8 @@ server <- function(input, output, session) {
       keep <- !lab %in% (input$rep_drop %||% character(0))
       validate(need(sum(keep) > 0,
         "Every row was excluded. Clear some entries from 'Row labels to exclude'."))
-      rgt  <- gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(), sep = sep)
+      rgt  <- gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(), sep = sep,
+                         strip_flags = !isTRUE(input$drop_flagged))
       rsm  <- ids[keep]
       gt   <- gid_consensus_from_reps(rgt, rsm)
       reps <- if (use_reps) list(gt = rgt, sample = rsm) else NULL
@@ -1074,7 +1081,8 @@ server <- function(input, output, session) {
       ids <- ave(ids, ids, FUN = function(z)
         if (length(z) == 1) z else paste0(z, "#", seq_along(z)))
     df$.gid_key <- ids
-    gt <- gid_matrix(df, ".gid_key", loci(), sep = sep)
+    gt <- gid_matrix(df, ".gid_key", loci(), sep = sep,
+                     strip_flags = !isTRUE(input$drop_flagged))
     grp <- if (nzchar(input$group_col %||% "")) as.character(df[[input$group_col]]) else rep("all", nrow(df))
     names(grp) <- ids
     grp[is.na(grp) | !nzchar(grp)] <- "unassigned"
@@ -1118,7 +1126,12 @@ server <- function(input, output, session) {
 
     nflag <- sum(grepl("[*?!#]", as.matrix(p$df[, lcols])))
     if (nflag > 0) f <- c(f, list(bad(sprintf(
-      "%d cells carry a quality flag character. The flag was stripped and the genotype kept. If your pipeline uses the flag to mean \"low confidence\", consider setting those cells to missing before upload.", nflag))))
+      "%d cells carry a quality flag character (%s). %s", nflag,
+      if (isTRUE(input$drop_flagged)) "discarded as missing"
+      else "the flag was stripped and the call kept",
+      if (isTRUE(input$drop_flagged))
+        "Untick \"Treat quality-flagged calls as missing\" in the sidebar to keep them instead."
+      else "If your pipeline uses the flag to mean \"low confidence\", tick \"Treat quality-flagged calls as missing\" in the sidebar and re-run to see how much it moves the answer."))))
 
     nblank <- sum(gid_blank_ids(raw(), input$id_col))
     if (nblank > 0) {

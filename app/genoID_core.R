@@ -51,11 +51,18 @@ gid_read <- function(path, sheet = NULL) {
 
 #' Normalise one genotype string.
 #'
-#' Strips quality flags (*, ?, !), upper-cases, splits on a separator if one is
-#' present, sorts the two alleles so that "TC" and "CT" are the same genotype,
-#' and maps every recognised missing code to NA.
+#' Upper-cases, splits on a separator if one is present, sorts the two alleles
+#' so that "TC" and "CT" are the same genotype, and maps every recognised
+#' missing code to NA.
+#'
+#' @param strip_flags TRUE removes a quality flag and keeps the call, so "CT*"
+#'   becomes "C/T". FALSE treats a flagged call as missing, which is the point
+#'   of flagging it. Without a separator the second behaviour fell out of the
+#'   length check for free; with one, "C/T*" used to split into "C" and "T*" and
+#'   sail through as a genotype carrying an allele named "T*".
 gid_norm_gt <- function(x, sep = NULL, strip_flags = TRUE) {
   x <- toupper(trimws(as.character(x)))
+  flagged <- grepl("[*?!#]", x) & !is.na(x)
   if (strip_flags) x <- gsub("[*?!#]", "", x)
   x[is.na(x)] <- ""
   out <- rep(NA_character_, length(x))
@@ -77,7 +84,8 @@ gid_norm_gt <- function(x, sep = NULL, strip_flags = TRUE) {
   a1 <- trimws(a1); a2 <- trimws(a2)
 
   bad <- a1 %in% MISSING_CODES | a2 %in% MISSING_CODES | !nzchar(a1) | !nzchar(a2) |
-    x %in% MISSING_CODES | (too_long & !x %in% MISSING_CODES)
+    x %in% MISSING_CODES | (too_long & !x %in% MISSING_CODES) |
+    (!strip_flags & flagged)
   # order-insensitive genotype
   lo <- pmin(a1, a2); hi <- pmax(a1, a2)
   out <- paste0(lo, "/", hi)
