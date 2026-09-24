@@ -922,8 +922,15 @@ server <- function(input, output, session) {
     if (inherits(p, "try-error") || is.null(p))
       return(showNotification("Load a file and choose your loci first.", type = "warning"))
     rp <- reps_available()
-    e <- try(withProgress(message = "Measuring genotyping error", value = 0.4,
-                          gid_estimate_error(p$gt, rp)), silent = TRUE)
+    ## The bar used to be pinned at 0.4 for the whole computation, so a slow
+    ## estimate was indistinguishable from a hang. It now reports each stage.
+    e <- try(withProgress(
+      message = "Measuring genotyping error", value = 0.05,
+      detail = "preparing",
+      gid_estimate_error(
+        p$gt, rp,
+        progress = function(v, d) setProgress(value = v, detail = d))),
+      silent = TRUE)
     if (inherits(e, "try-error"))
       return(showNotification(paste("Could not estimate:", conditionMessage(attr(e, "condition"))),
                               type = "error"))

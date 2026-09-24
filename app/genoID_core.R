@@ -392,7 +392,10 @@ gid_subsample <- function(x, n, seed = 1L) {
 
 gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
                          init = c(0.05, 0.01), min_reps = 2, groups = NULL,
-                         max_samples = 200L) {
+                         max_samples = 200L, progress = NULL) {
+  ## progress(fraction, detail) if supplied. A plain callback keeps this
+  ## function free of any dependency on Shiny.
+  tick <- function(v, d) if (is.function(progress)) progress(v, d)
   loci <- colnames(rep_gt)
   sample_ids <- as.character(sample_ids)
 
@@ -454,25 +457,51 @@ gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
     }
     tot
   }
+  tick(0.15, sprintf("fitting to %d samples", length(unique(sample_ids))))
   fit <- stats::optim(qlogis(init), nll, method = "Nelder-Mead",
                       control = list(reltol = 1e-9, maxit = 800))
+  tick(0.45, "confidence interval for dropout")
   # profile-likelihood 95% interval on each rate (2 log-likelihood units)
+  ## The interval is found by walking out from the fit until the likelihood
+  ## drops by 1.92, then bisecting. A fixed grid spent 150 evaluations per
+  ## parameter regardless, and on a real dataset that was 48 of the 53 seconds
+  ## the whole estimate took -- the fit itself was 5. This needs roughly 20 per
+  ## side and lands in the same place, because the endpoint is all that matters.
+  ll0    <- -nll(fit$par)
+  target <- ll0 - 1.92
   ci <- function(k) {
-    ## Log-spaced, not evenly spaced. An even grid from 1e-4 to 0.5 steps by
-    ## 0.0042, which is coarser than the rates a clean lab actually achieves:
-    ## every false-allele interval collapsed onto the same few grid points and
-    ## could not contain a true rate below ~0.004. The fitted value is forced
-    ## into the grid so the interval always contains its own point estimate.
-    probs <- exp(seq(log(1e-5), log(0.5), length.out = 150))
-    grid  <- sort(unique(c(qlogis(probs), fit$par[k])))
-    ll <- vapply(grid, function(v) { par <- fit$par; par[k] <- v; -nll(par) }, 0)
-    ok <- plogis(grid[ll >= max(ll) - 1.92])
-    c(min(ok), max(ok))
+    at <- function(v) { par <- fit$par; par[k] <- v; -nll(par) }
+    side <- function(dir) {
+      x0 <- fit$par[k]
+      bound <- if (dir < 0) qlogis(1e-6) else qlogis(0.9)
+      inside <- x0; outside <- NA_real_; x <- x0; step <- 0.3
+      for (i in 1:14) {
+        x <- x + dir * step
+        step <- step * 1.5
+        if ((dir < 0 && x <= bound) || (dir > 0 && x >= bound)) x <- bound
+        if (at(x) < target) { outside <- x; break }
+        inside <- x
+        if (x == bound) break
+      }
+      ## never dropped far enough: the data does not bound this side, so report
+      ## how far we actually looked rather than inventing a tighter number
+      if (is.na(outside)) return(plogis(inside))
+      for (i in 1:10) {
+        mid <- (inside + outside) / 2
+        if (at(mid) < target) outside <- mid else inside <- mid
+      }
+      plogis((inside + outside) / 2)
+    }
+    c(side(-1), side(+1))
   }
+  ci_d <- ci(1)
+  tick(0.75, "confidence interval for false alleles")
+  ci_f <- ci(2)
+  tick(0.95, "done")
   c(n_used = length(unique(sample_ids)),
     dropout = plogis(fit$par[1]), false_allele = plogis(fit$par[2]),
-    dropout_lo = ci(1)[1], dropout_hi = ci(1)[2],
-    false_lo = ci(2)[1], false_hi = ci(2)[2],
+    dropout_lo = ci_d[1], dropout_hi = ci_d[2],
+    false_lo = ci_f[1], false_hi = ci_f[2],
     logLik = -fit$value, converged = fit$convergence == 0)
 }
 
@@ -512,7 +541,7 @@ gid_error_from_fis <- function(gt) {
 #' @param gt   consensus genotype matrix, one row per sample.
 #' @param reps optional list(gt = replicate genotype matrix, sample = ids).
 gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
-                               group = NULL) {
+                               group = NULL, progress = NULL) {
 
   ## Fis and allele frequencies both need one sample per individual. Use exact
   ## matching to deduplicate, which needs no error model and so cannot be
@@ -545,7 +574,7 @@ gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
     if (sum(n_per >= min_reps) >= 5) {
       rep_groups <- if (is.null(group)) NULL else unname(group[as.character(reps$sample)])
       ml <- try(gid_error_ml(reps$gt, reps$sample, freqs = freqs, min_reps = min_reps,
-                             groups = rep_groups),
+                             groups = rep_groups, progress = progress),
                 silent = TRUE)
       if (!inherits(ml, "try-error"))
         return(list(method = "replicates",
