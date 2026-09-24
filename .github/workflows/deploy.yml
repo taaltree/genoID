@@ -45,6 +45,7 @@ jobs:
             any::DT
             any::ggplot2
             any::leaflet
+            any::readxl
 
       - name: Export app to WebAssembly
         run: |

@@ -246,7 +246,7 @@ ui <- page_navbar(
     .gid-advice{background:#fff;border:1px solid #e3e9ef;border-left:3px solid #1d3557;
       border-radius:0 4px 4px 0;padding:.9rem 1.1rem;margin-bottom:1rem;
       box-shadow:0 1px 3px rgba(29,53,87,.06)}
-    .gid-advice-head{margin-bottom:.55rem;font-size:.95rem}
+    .gid-advice-head{margin-bottom:.55rem;font-size:.95rem;cursor:pointer}
     .gid-advice-row{display:grid;grid-template-columns:7.2rem 1fr;gap:.9rem;
       padding:.65rem 0;border-top:1px solid #eef2f6;align-items:start}
     .gid-advice-title{font-weight:600;font-size:.92rem;color:#1d3557}
@@ -568,8 +568,6 @@ ui <- page_navbar(
     "Individuals", icon = icon("fingerprint"),
     uiOutput("method_header"),
     uiOutput("run_status_ind"),
-    uiOutput("advice_card"),
-    uiOutput("spatial_diag"),
     uiOutput("power_warning"),
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
@@ -579,6 +577,12 @@ ui <- page_navbar(
            key = "median_samples"),
       vbox("Largest cluster", "vb_max", "maximize", "light", key = "max_cluster")
     ),
+    ## The answer comes before anything explaining it. These cards used to sit
+    ## above the table and pushed it past 2,500px down the page, which read as
+    ## the assignments not being there at all.
+    card(card_header("Individual assignments"), DTOutput("tbl_final")),
+    uiOutput("advice_card"),
+    uiOutput("spatial_diag"),
     uiOutput("recap_detail"),
     layout_columns(
       col_widths = c(6, 6),
@@ -589,7 +593,6 @@ ui <- page_navbar(
            hint("A clean panel gives two piles with a gap. Pairs sitting in the gap ",
                 "are the ones worth looking at by hand."))
     ),
-    card(card_header("Individual assignments"), DTOutput("tbl_final")),
     conditionalPanel("input.method == 'probabilistic'",
       card(card_header("Choosing your posterior cutoff"),
         hint("The cutoff is the one setting with no data behind it \u2014 unless ",
@@ -771,10 +774,9 @@ server <- function(input, output, session) {
     f <- f[file.exists(f)]
     if (!length(f)) return(showNotification("Example file not found.", type = "error"))
     raw(gid_read(f[1])); demo_loaded(TRUE)
-    # the example was simulated at these rates; start the user at the truth so
-    # the demo shows the method working, then let them break it on purpose
-    updateSliderInput(session, "dropout", value = 0.03)
-    updateSliderInput(session, "false_allele", value = 0.01)
+    ## The sliders are deliberately NOT set to the truth. The example now ships
+    ## with PCR replicates, so the point is to press "Estimate from replicates"
+    ## and watch the rates come back out of the data.
     updateNumericInput(session, "min_loci", value = 12)
   })
   observeEvent(input$file, demo_loaded(FALSE))
@@ -782,11 +784,21 @@ server <- function(input, output, session) {
   output$demo_note <- renderUI({
     if (!isTRUE(demo_loaded())) return(NULL)
     tags$div(class = "gid-flag", style = "margin:.5rem 0 .2rem;font-size:.8rem",
-      tags$b("Example data loaded."), " 55 simulated samples from 28 known individuals in ",
-      "two species. The true answer is in the ", tags$code("TrueIndividual"), " column, so ",
-      "you can check any method against it. Simulated with 3% dropout and 1% false alleles \u2014 ",
-      "the sliders have been set to match. Lower them and re-run to see what happens when you ",
-      "understate your error rate.")
+      tags$b("Example data loaded."), " 55 samples from 28 known individuals in two ",
+      "species, each amplified ", tags$b("three times"), " and followed by the lab's ",
+      "consensus row \u2014 220 rows in all. It also carries sex, collection dates ",
+      "across two field seasons, and coordinates.",
+      tags$div(style = "margin-top:.3rem",
+        tags$b("Try this first: "), "press ", tags$b("Estimate from replicates"),
+        ". The data was simulated at ", tags$code("dropout 0.015"), " and ",
+        tags$code("false allele 0.002"), " per reaction. Dropout comes back close ",
+        "to 0.015; the false-allele estimate reads a little high, around 0.005, ",
+        "with an interval that still covers 0.002 \u2014 that is the family group ",
+        "below, not a mistake."),
+      tags$div(style = "margin-top:.3rem",
+        "The true answer is in ", tags$code("TrueIndividual"), ", so you can score ",
+        "any method against it. The second species is a family group: relatives ",
+        "are the hard case, and pooling them inflates the false-allele estimate."))
   })
 
   output$has_data <- reactive(!is.null(raw()))
@@ -885,9 +897,13 @@ server <- function(input, output, session) {
     df <- raw()
     if (is.null(df) || !isTRUE(has_reps()) || !nzchar(input$rep_col %||% "")) return(NULL)
     if (!length(loci())) return(NULL)
+    df   <- df[!gid_blank_ids(df, input$id_col), , drop = FALSE]
+    if (!nrow(df)) return(NULL)
     lab  <- as.character(df[[input$rep_col]])
     keep <- !lab %in% (input$rep_drop %||% character(0))
     if (!any(keep)) return(NULL)
+    ## gid_matrix() drops unusable ids itself, so the parallel vector of sample
+    ## names has to be taken from the same filtered frame or the two misalign.
     list(gt = gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(),
                          sep = gid_guess_sep(df, exclude = input$id_col)),
          sample = as.character(df[[input$id_col]])[keep])
@@ -1013,6 +1029,14 @@ server <- function(input, output, session) {
   ## sample x locus matrix, filtered
   prep <- reactive({
     df <- raw(); req(df, input$id_col, length(loci()) > 0)
+    ## Rows with no usable identifier are removed here, before anything is keyed
+    ## by them. Left in, they all collapse into one pseudo-sample whose
+    ## "replicates" are unrelated animals, which both crashes the error
+    ## estimator and, when it does run, wrecks the rates it reports.
+    blank <- gid_blank_ids(df, input$id_col)
+    if (any(blank)) df <- df[!blank, , drop = FALSE]
+    validate(need(nrow(df) > 0, paste(
+      "Every row has a blank", input$id_col, "- choose a different Sample ID column.")))
     ids <- as.character(df[[input$id_col]])
     sep <- gid_guess_sep(df, exclude = input$id_col)
     use_reps <- isTRUE(has_reps()) && identical(input$rep_mode, "reps") &&
@@ -1078,18 +1102,51 @@ server <- function(input, output, session) {
     ok <- function(x) tags$div(class = "gid-flag gid-ok", x)
     bad <- function(x) tags$div(class = "gid-flag", x)
 
-    nre <- sum(gsub("/", "", p$raw_gt) !=
-                 toupper(gsub("[*?!#]", "", as.matrix(p$df[, colnames(p$raw_gt)]))), na.rm = TRUE)
+    ## p$raw_gt has one row per SAMPLE; p$df has one row per REACTION on a
+    ## replicate file, so the two cannot be compared cell for cell. Normalise the
+    ## uploaded rows themselves instead -- gid_norm_gt() is column-wise and keeps
+    ## every row, so the shapes always match.
+    lcols  <- colnames(p$raw_gt)
+    sep_qc <- gid_guess_sep(p$df, exclude = input$id_col)
+    norm_m <- vapply(lcols, function(L) gid_norm_gt(p$df[[L]], sep = sep_qc),
+                     character(nrow(p$df)))
+    if (is.null(dim(norm_m))) norm_m <- matrix(norm_m, nrow = nrow(p$df))
+    nre <- sum(gsub("/", "", norm_m) !=
+                 toupper(gsub("[*?!#]", "", as.matrix(p$df[, lcols]))), na.rm = TRUE)
     if (nre > 0) f <- c(f, list(bad(sprintf(
       "%d genotype cells had their two alleles written in the other order (AG vs GA). They are now normalised; compared as raw text they would have counted as mismatches.", nre))))
 
-    nflag <- sum(grepl("[*?!#]", as.matrix(p$df[, colnames(p$raw_gt)])))
+    nflag <- sum(grepl("[*?!#]", as.matrix(p$df[, lcols])))
     if (nflag > 0) f <- c(f, list(bad(sprintf(
       "%d cells carry a quality flag character. The flag was stripped and the genotype kept. If your pipeline uses the flag to mean \"low confidence\", consider setting those cells to missing before upload.", nflag))))
 
+    nblank <- sum(gid_blank_ids(raw(), input$id_col))
+    if (nblank > 0) {
+      alt <- setdiff(names(raw()), c(input$id_col, colnames(p$raw_gt)))
+      alt <- alt[vapply(alt, function(k)
+        !any(gid_blank_ids(raw(), k)) && anyDuplicated(as.character(raw()[[k]])) > 0, TRUE)]
+      f <- c(f, list(bad(tagList(
+        sprintf("%d rows have a blank %s and were dropped. ", nblank, input$id_col),
+        "They cannot be looked up by name, and left in they merge into a single ",
+        "fake sample whose replicates are different animals \u2014 which corrupts ",
+        "the estimated error rates.",
+        if (length(alt)) tagList(" A column with no blanks that still repeats: ",
+                                 tags$b(alt[1]),
+                                 ". Switch to it if that is your sample identifier.")))))
+    }
+
+    ## On a replicate file the repeated ids ARE the replicates and nothing is
+    ## suffixed, so the warning below would be both wrong and alarming.
+    on_reps <- isTRUE(has_reps()) && nzchar(input$rep_col %||% "")
     dupn <- sum(duplicated(as.character(p$df[[input$id_col]])))
-    if (dupn > 0) f <- c(f, list(bad(sprintf(
+    if (dupn > 0 && !on_reps) f <- c(f, list(bad(sprintf(
       "%d duplicated sample IDs. They were kept and suffixed with #1, #2 -- if these are the same extract run twice they are a useful positive control, since any correct method must put them together.", dupn))))
+    if (on_reps) f <- c(f, list(ok(sprintf(
+      "%d rows for %d samples, read as replicate reactions from the %s column. %s",
+      nrow(p$df), nrow(p$gt), input$rep_col,
+      if (identical(input$rep_mode, "reps"))
+        "Every reaction is being used directly, which is the stronger route."
+      else "They are being collapsed to a consensus first."))))
 
     if (length(p$dropped_loci)) f <- c(f, list(bad(paste0(
       "Loci dropped for low call rate or being monomorphic: ",
@@ -1332,14 +1389,22 @@ server <- function(input, output, session) {
     chip <- function(sev) tags$span(
       class = paste0("gid-sev gid-sev-", sev),
       switch(sev, high = "change this", medium = "worth changing", "consider"))
-    tags$div(
-      class = "gid-advice",
-      tags$div(class = "gid-advice-head",
+    ## Folded shut unless something wants changing urgently: open, this card is
+    ## nearly 900px tall and buries the results it is commenting on.
+    urgent <- any(a$severity == "high")
+    tags$details(
+      class = "gid-advice", open = if (urgent) NA else NULL,
+      tags$summary(
+        class = "gid-advice-head",
         tags$b(sprintf("%d thing%s to consider before your next run", nrow(a),
                        if (nrow(a) == 1) "" else "s")),
         tags$span(class = "gid-hint", style = "margin-left:.5rem",
-                  "Each one is drawn from your own data. Applying a change does ",
-                  "not re-run anything \u2014 press Identify individuals when ready.")),
+                  paste(unique(as.character(a$severity)), collapse = ", ")),
+        tags$span(class = "gid-hint", style = "margin-left:.5rem",
+                  "\u2014 click to open")),
+      tags$div(class = "gid-hint", style = "margin:.2rem 0 .5rem",
+               "Each one is drawn from your own data. Applying a change does ",
+               "not re-run anything \u2014 press Identify individuals when ready."),
       lapply(seq_len(nrow(a)), function(i) tags$div(
         class = "gid-advice-row",
         tags$div(chip(as.character(a$severity[i]))),

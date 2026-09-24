@@ -172,13 +172,30 @@ gid_guess_id_col <- function(df, exclude = NULL) {
 }
 
 
+#' Rows whose sample identifier is unusable.
+#'
+#' An empty identifier is worse than a missing one. R cannot index a matrix by
+#' "" at all -- the lookup never matches, even when a row is literally named
+#' that -- so a blank ID turns into a subscript-out-of-bounds crash several
+#' functions later. Worse, every blank-ID row collapses into a single
+#' pseudo-sample whose "replicates" are unrelated animals, which drove a real
+#' dataset's estimated false-allele rate to 15%.
+gid_blank_ids <- function(df, id_col) {
+  v <- as.character(df[[id_col]])
+  is.na(v) | !nzchar(trimws(v)) | trimws(v) %in% c("NA", "#N/A")
+}
+
 #' Build the normalised sample x locus genotype matrix.
 gid_matrix <- function(df, id_col, loci, sep = NULL, strip_flags = TRUE) {
+  bad <- gid_blank_ids(df, id_col)
+  if (any(bad)) df <- df[!bad, , drop = FALSE]
   ids <- as.character(df[[id_col]])
   m <- vapply(loci, function(L) gid_norm_gt(df[[L]], sep = sep, strip_flags = strip_flags),
               character(nrow(df)))
   if (is.null(dim(m))) m <- matrix(m, nrow = nrow(df))
   dimnames(m) <- list(ids, loci)
+  ## Callers that keep a parallel vector of sample ids need to know rows went.
+  attr(m, "dropped_blank_id") <- sum(bad)
   m
 }
 
@@ -354,27 +371,73 @@ gid_error_rates <- function(rep_gt, ref_gt, sample_id_rep, sample_id_ref) {
 #'   L = prod_{sample,locus} sum_g P(g) prod_k P(obs_k | g, d, f)
 #'
 #' and maximises over the two rates. Requires >= 2 replicates per sample.
-gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
-                         init = c(0.05, 0.01), min_reps = 2) {
-  loci <- colnames(rep_gt)
-  if (is.null(freqs)) freqs <- gid_allele_freq(rep_gt)
+#' A reproducible subsample that leaves the caller's RNG stream untouched.
+#' (Named for what it does; nothing to do with the withr package.)
+gid_subsample <- function(x, n, seed = 1L) {
+  old <- if (exists(".Random.seed", .GlobalEnv)) get(".Random.seed", .GlobalEnv) else NULL
+  set.seed(seed)
+  out <- sample(x, n)
+  if (is.null(old)) rm(".Random.seed", envir = .GlobalEnv)
+  else assign(".Random.seed", old, envir = .GlobalEnv)
+  out
+}
 
-  # collapse to one list per locus of replicate-observation vectors
-  by_locus <- lapply(loci, function(L) {
-    v <- split(rep_gt[, L], sample_ids)
-    v <- lapply(v, function(z) z[!is.na(z)])
-    v[vapply(v, length, 1L) >= min_reps]
+gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
+                         init = c(0.05, 0.01), min_reps = 2, groups = NULL,
+                         max_samples = 200L) {
+  loci <- colnames(rep_gt)
+  sample_ids <- as.character(sample_ids)
+
+  ## Two error rates estimated from a few hundred samples are already pinned
+  ## down; the next thousand samples buy a third decimal place and cost minutes.
+  ## On a 580-sample dataset the fit took 140 seconds locally, which under
+  ## WebAssembly reads as a hang. Subsample, with a fixed seed so the answer is
+  ## reproducible, and keep every replicate of the samples that are kept.
+  uniq <- unique(sample_ids)
+  if (is.finite(max_samples) && length(uniq) > max_samples) {
+    keep_s <- gid_subsample(uniq, max_samples)
+    k <- sample_ids %in% keep_s
+    rep_gt <- rep_gt[k, , drop = FALSE]
+    sample_ids <- sample_ids[k]
+    if (!is.null(groups)) groups <- groups[k]
+  }
+
+  ## Allele frequencies belong to a population; error rates belong to the assay.
+  ## Pooling two species into one frequency vector makes the genotype prior
+  ## wrong for both, and the likelihood buys that mismatch back by inflating the
+  ## false-allele rate -- on a two-species test it more than doubled it. So the
+  ## data is split into groups that each carry their own frequencies, while the
+  ## two error parameters stay shared across all of them.
+  g  <- if (is.null(groups)) rep("all", length(sample_ids)) else as.character(groups)
+  gl <- unique(g[!is.na(g)])
+  ## freqs may be one frequency list (used for every group) or a list of them
+  ## keyed by group name
+  per_group_freqs <- !is.null(freqs) && length(gl) > 1 && all(gl %in% names(freqs))
+
+  units <- lapply(gl, function(gg) {
+    k   <- which(g == gg)
+    rg  <- rep_gt[k, , drop = FALSE]
+    sid <- sample_ids[k]
+    fr  <- if (per_group_freqs) freqs[[gg]]
+           else if (!is.null(freqs) && length(gl) == 1) freqs
+           else gid_allele_freq(rg)
+    bl <- lapply(loci, function(L) {
+      v <- split(rg[, L], sid)
+      v <- lapply(v, function(z) z[!is.na(z)])
+      v[vapply(v, length, 1L) >= min_reps]
+    })
+    names(bl) <- loci
+    list(freqs = fr, by_locus = bl)
   })
-  names(by_locus) <- loci
 
   nll <- function(par) {
     d <- plogis(par[1]); f <- plogis(par[2])
     tot <- 0
-    for (L in loci) {
-      obs <- by_locus[[L]]
+    for (u in units) for (L in loci) {
+      obs <- u$by_locus[[L]]
       if (!length(obs)) next
-      p <- freqs[[L]]; dict <- sort(unique(unlist(obs)))
-      if (length(dict) < 1) next
+      p <- u$freqs[[L]]; dict <- sort(unique(unlist(obs)))
+      if (length(dict) < 1 || is.null(p)) next
       E  <- gid_obs_matrix(dict, p, d, f)          # E[obs, true]
       gp <- gid_geno_prob(p, dict)
       idx <- lapply(obs, function(z) match(z, dict))
@@ -387,12 +450,19 @@ gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
                       control = list(reltol = 1e-9, maxit = 800))
   # profile-likelihood 95% interval on each rate (2 log-likelihood units)
   ci <- function(k) {
-    grid <- qlogis(seq(1e-4, 0.5, length.out = 120))
+    ## Log-spaced, not evenly spaced. An even grid from 1e-4 to 0.5 steps by
+    ## 0.0042, which is coarser than the rates a clean lab actually achieves:
+    ## every false-allele interval collapsed onto the same few grid points and
+    ## could not contain a true rate below ~0.004. The fitted value is forced
+    ## into the grid so the interval always contains its own point estimate.
+    probs <- exp(seq(log(1e-5), log(0.5), length.out = 150))
+    grid  <- sort(unique(c(qlogis(probs), fit$par[k])))
     ll <- vapply(grid, function(v) { par <- fit$par; par[k] <- v; -nll(par) }, 0)
     ok <- plogis(grid[ll >= max(ll) - 1.92])
     c(min(ok), max(ok))
   }
-  c(dropout = plogis(fit$par[1]), false_allele = plogis(fit$par[2]),
+  c(n_used = length(unique(sample_ids)),
+    dropout = plogis(fit$par[1]), false_allele = plogis(fit$par[2]),
     dropout_lo = ci(1)[1], dropout_hi = ci(1)[2],
     false_lo = ci(2)[1], false_hi = ci(2)[2],
     logLik = -fit$value, converged = fit$convergence == 0)
@@ -433,7 +503,8 @@ gid_error_from_fis <- function(gt) {
 #'
 #' @param gt   consensus genotype matrix, one row per sample.
 #' @param reps optional list(gt = replicate genotype matrix, sample = ids).
-gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2) {
+gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
+                               group = NULL) {
 
   ## Fis and allele frequencies both need one sample per individual. Use exact
   ## matching to deduplicate, which needs no error model and so cannot be
@@ -441,15 +512,32 @@ gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2) {
   dedup <- function(m) {
     if (nrow(m) < 3) return(m)
     a <- gid_method_exact(m, min_loci = max(5, floor(ncol(m) * 0.4)))$assignment
-    m[a$sample[!duplicated(a$individual)], , drop = FALSE]
+    keep <- a$sample[!duplicated(a$individual)]
+    keep <- keep[!is.na(keep) & nzchar(keep) & keep %in% rownames(m)]
+    if (!length(keep)) return(m)
+    m[keep, , drop = FALSE]
   }
   gt_u <- dedup(gt)
-  if (is.null(freqs)) freqs <- gid_allele_freq(gt_u)
+
+  ## With a grouping column, every group gets its own frequencies. Groups too
+  ## small to estimate frequencies from fall back to the pooled ones rather than
+  ## contributing a vector built from three animals.
+  grp_of <- if (is.null(group)) NULL else as.character(group[rownames(gt_u)])
+  if (is.null(freqs)) {
+    freqs <- gid_allele_freq(gt_u)
+    if (!is.null(grp_of) && length(unique(grp_of[!is.na(grp_of)])) > 1) {
+      pooled <- freqs
+      freqs <- lapply(split(rownames(gt_u), grp_of), function(ids)
+        if (length(ids) >= 8) gid_allele_freq(gt_u[ids, , drop = FALSE]) else pooled)
+    }
+  }
 
   if (!is.null(reps)) {
     n_per <- table(reps$sample)
     if (sum(n_per >= min_reps) >= 5) {
-      ml <- try(gid_error_ml(reps$gt, reps$sample, freqs = freqs, min_reps = min_reps),
+      rep_groups <- if (is.null(group)) NULL else unname(group[as.character(reps$sample)])
+      ml <- try(gid_error_ml(reps$gt, reps$sample, freqs = freqs, min_reps = min_reps,
+                             groups = rep_groups),
                 silent = TRUE)
       if (!inherits(ml, "try-error"))
         return(list(method = "replicates",
@@ -1680,6 +1768,17 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
                   d0, f0, dm, fm),
           "error_rates", NA_real_, "Apply measured rates")
   }
+
+  ## ---- 2b. replicates present but never measured -------------------------
+  if (isTRUE(has_reps) && is.null(err_measured))
+    add("measure_error", "high",
+        "Measure your error rates from the replicates",
+        paste("Your file has several reactions per sample, which is exactly what",
+              "is needed to measure dropout and false alleles directly. Until you",
+              "do, the analysis is running on default rates that came from nobody's",
+              "data."),
+        "Press \"Estimate from replicates\" in the sidebar.",
+        NA_character_, NA_real_, NA_character_)
 
   ## ---- 3. replicates on the table but not on the plate -------------------
   if (isTRUE(has_reps) && !isTRUE(using_reps))
