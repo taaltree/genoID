@@ -317,6 +317,88 @@ gid_marker_svg <- function(shape, fill, size = 17, stroke = "#33383d") {
           jsonlite::base64_enc(charToRaw(svg)))
 }
 
+#' The nearest genetic rival, and how far away it was found.
+#'
+#' A false split leaves a signature two ways at once: the sample's closest
+#' genetic match sits in a DIFFERENT individual, and that sample was picked up
+#' nearby. Either alone is weak -- animals have neighbours, and relatives look
+#' alike -- but together they are the pattern a split produces, because both
+#' halves came off the same animal in the same place.
+#'
+#' Distance is judged against this dataset rather than a fixed number: the
+#' comparison that matters is how far apart samples of the SAME animal usually
+#' are here, which depends on home-range size and how the survey was walked.
+gid_rival_block <- function(row, all_pts, post_cut = NA_real_) {
+  fmt_d <- function(m) if (!is.finite(m)) "unknown" else
+    if (m < 1000) sprintf("%.0f m", m) else sprintf("%.1f km", m / 1000)
+
+  rv <- row$rival_sample[1]
+  sc <- row$rival[1]
+  scale <- attr(all_pts, "scale")
+  lab <- switch(as.character(scale),
+                posterior = "posterior that they are the same animal",
+                lambda    = "lambda",
+                mismatch  = "similarity",
+                "score")
+
+  if (is.null(rv) || is.na(rv) || !nzchar(rv))
+    return(tags$div(class = "gid-flag gid-ok", style = "margin-top:.5rem;font-size:.82rem",
+      tags$b("No close rival. "),
+      "No sample assigned to another animal comes near this one genetically, so ",
+      "nothing here looks like a split."))
+
+  b <- all_pts[all_pts$sample == rv, , drop = FALSE]
+  d_m <- if (nrow(b)) gid_dist_m(row$lon[1], row$lat[1], b$lon[1], b$lat[1]) else NA_real_
+
+  ## how far apart samples of one animal typically are, in this dataset
+  typical <- local({
+    v <- split(all_pts[, c("lon", "lat")], all_pts$animal)
+    dd <- unlist(lapply(v, function(x) {
+      if (nrow(x) < 2) return(NULL)
+      k <- utils::combn(nrow(x), 2)
+      gid_dist_m(x$lon[k[1, ]], x$lat[k[1, ]], x$lon[k[2, ]], x$lat[k[2, ]])
+    }), use.names = FALSE)
+    if (length(dd)) stats::median(dd, na.rm = TRUE) else NA_real_
+  })
+
+  gen_close <- identical(as.character(scale), "posterior") && is.finite(sc) && sc > 0.01
+  spa_close <- is.finite(d_m) && ((is.finite(typical) && d_m <= typical) || d_m < 1000)
+
+  verdict <- if (gen_close && spa_close)
+    tags$div(class = "gid-flag", style = "margin-top:.4rem;font-size:.82rem",
+      tags$b("Worth a second look. "),
+      "This is the closest thing to a genetic match in the whole dataset, and it ",
+      "was found closer than samples of one animal usually are here. That is what ",
+      "a single animal split into two looks like. Re-amplify both at the loci ",
+      "where they differ before reporting them as separate animals.")
+  else if (gen_close)
+    tags$div(class = "gid-hint", style = "margin-top:.4rem",
+      sprintf("Genetically the closest candidate, but %s away%s, which argues against a split.",
+              fmt_d(d_m),
+              if (is.finite(typical)) sprintf(" when samples of one animal here are typically %s apart",
+                                              fmt_d(typical)) else ""))
+  else
+    tags$div(class = "gid-hint", style = "margin-top:.4rem",
+      "Genetically well separated from every other animal, so the distance does ",
+      "not matter here.")
+
+  tagList(
+    tags$div(class = "gid-label", style = "margin-top:.7rem", "Closest other animal"),
+    tags$table(class = "table table-sm gid-kv",
+      tags$tr(tags$td(tags$b("Sample")), tags$td(tags$code(rv),
+        if (nrow(b)) tags$span(class = "gid-hint", sprintf(" (%s)", b$animal[1])))),
+      tags$tr(tags$td(tags$b(lab)),
+              tags$td(if (is.finite(sc)) signif(sc, 4) else "not comparable",
+                      if (is.finite(post_cut) && identical(as.character(scale), "posterior"))
+                        tags$span(class = "gid-hint", sprintf(" (cutoff %s)", post_cut)))),
+      tags$tr(tags$td(tags$b("Distance apart")), tags$td(fmt_d(d_m))),
+      if (is.finite(typical))
+        tags$tr(tags$td(tags$b("Typical for one animal")), tags$td(fmt_d(typical)))),
+    verdict,
+    if (!nrow(b)) tags$p(class = "gid-hint",
+      "That sample has no coordinates, so the two cannot be compared in space."))
+}
+
 #' Build the interactive map. Shared by the on-screen view and the exported
 #' HTML file, so the two cannot drift apart.
 #'
@@ -645,6 +727,12 @@ gid_map_server <- function(input, output, session, deps) {
     cf <- tryCatch(deps$conf(), error = function(e) NULL)
     g$status <- if (!is.null(cf)) as.character(cf$status[match(g$sample, cf$sample)]) else NA
     g$margin <- if (!is.null(cf)) cf$margin[match(g$sample, cf$sample)] else NA
+    ## The strongest link to a sample assigned to a DIFFERENT animal. If that
+    ## rival is also right next door, the two may be one animal split in two.
+    k <- if (!is.null(cf)) match(g$sample, cf$sample) else NA
+    g$rival        <- if (!is.null(cf)) cf$rival[k] else NA_real_
+    g$rival_sample <- if (!is.null(cf)) as.character(cf$rival_sample[k]) else NA_character_
+    attr(g, "scale") <- if (!is.null(cf)) attr(cf, "scale") else NA_character_
 
     df  <- deps$prep()$df
     ids <- as.character(df[[input$id_col]])
@@ -826,6 +914,33 @@ gid_map_server <- function(input, output, session, deps) {
     deps$restored_view(NULL)
   }, ignoreNULL = TRUE)
 
+  ## A dashed line to the nearest rival, drawn on click. Only reachable while
+  ## the map is on screen, so leafletProxy() is safe here.
+  observeEvent(input$geo_map_marker_click, {
+    id <- input$geo_map_marker_click$id
+    p  <- leaflet::leafletProxy("geo_map") |> leaflet::clearGroup("selection")
+    d  <- tryCatch(pts(), error = function(e) NULL)
+    if (is.null(d) || is.null(id)) return(invisible(p))
+    a <- d[d$sample == id, , drop = FALSE]
+    if (!nrow(a)) return(invisible(p))
+    p <- leaflet::addCircleMarkers(
+      p, lng = a$lon[1], lat = a$lat[1], radius = 13, group = "selection",
+      color = "#1d3557", weight = 2, fill = FALSE)
+    rv <- a$rival_sample[1]
+    if (!is.na(rv) && rv %in% d$sample) {
+      b <- d[d$sample == rv, , drop = FALSE]
+      p <- p |>
+        leaflet::addPolylines(lng = c(a$lon[1], b$lon[1]), lat = c(a$lat[1], b$lat[1]),
+                              color = "#c1502e", weight = 2, opacity = 0.9,
+                              dashArray = "6,6", group = "selection") |>
+        leaflet::addCircleMarkers(lng = b$lon[1], lat = b$lat[1], radius = 10,
+                                  group = "selection", color = "#c1502e",
+                                  weight = 2, fill = FALSE,
+                                  label = sprintf("%s - closest rival", rv))
+    }
+    invisible(p)
+  })
+
   ## ---- click a scat --------------------------------------------------------
   output$map_detail <- renderUI({
     id <- input$geo_map_marker_click$id
@@ -860,6 +975,7 @@ gid_map_server <- function(input, output, session, deps) {
         if (length(mates))
           tags$tr(tags$td(tags$b("Other samples")),
                   tags$td(paste(mates, collapse = ", ")))),
+      gid_rival_block(row, pts(), input$post_cut %||% NA_real_),
       tags$p(class = "gid-hint", style = "margin-top:.4rem",
              sprintf("Genotype: %d of %d loci called",
                      sum(!is.na(g)), length(g))),
