@@ -409,6 +409,8 @@ gid_rival_block <- function(row, all_pts, ctx, mm, ev = list(),
   num <- function(x) suppressWarnings(as.numeric(x %||% NA)[1])
   kv <- function(k, ...) tags$tr(tags$td(tags$b(k)), tags$td(...))
   hint <- function(...) tags$span(class = "gid-hint", ...)
+  ## for a hint that continues the value with "; ...": no space before it
+  more <- function(...) tags$span(class = "gid-hint", ..., .noWS = "before")
 
   rv <- row$rival_sample[1]
   if (is.null(rv) || is.na(rv) || !nzchar(rv))
@@ -495,18 +497,27 @@ gid_rival_block <- function(row, all_pts, ctx, mm, ev = list(),
   else
     tags$div(class = "gid-hint", style = "margin-top:.4rem",
       tags$b("Different animals. "),
-      sprintf("They differ at %s", diff_txt),
-      if (is.finite(q95))
-        sprintf(", more than genotyping error makes two samples of one animal differ here (up to %s)",
-                pct(q95))
-      else ", more than the two or fewer that would suggest a split",
-      ", so the distance between them does not matter.",
-      if ((isTRUE(F_d <= 0.5) || isTRUE(d_m < 1000)) && isTRUE(p < ctx$rival_median))
-        paste0(" They are more alike than most samples are to their closest other ",
-               "animal, and were found close together, which fits a relative ",
-               "sharing the area."))
+      ## one string: separate pieces would each gain a space before the comma
+      paste0(
+        sprintf("They differ at %s", diff_txt),
+        if (is.finite(q95) && q95 > 0)
+          sprintf(", more than genotyping error makes two samples of one animal differ here (up to %s)",
+                  pct(q95))
+        else if (is.finite(q95)) ", while two samples of one animal here match at every locus they share"
+        else ", more than the two or fewer that would suggest a split",
+        ", so the distance between them does not matter.",
+        if ((isTRUE(F_d <= 0.5) || isTRUE(d_m < 1000)) && isTRUE(p < ctx$rival_median))
+          paste0(" They are more alike than most samples are to their closest other ",
+                 "animal, and were found close together, which fits a relative ",
+                 "sharing the area.")))
 
-  scale_note <- if (isTRUE(ctx$n_within >= 10))
+  scale_note <- if (isTRUE(ctx$n_within >= 10) && isTRUE(ctx$within_q95 == 0))
+    tags$p(class = "gid-hint", style = "margin:.35rem 0 0",
+      sprintf(paste0("For scale: same-animal pairs (two samples %s places in one animal) ",
+                     "match at every locus they share, so genotyping error barely shows here. ",
+                     "A sample's closest other animal differs at a median of %s of loci."),
+              ctx$baseline %||% "the model", pct(ctx$rival_median)))
+  else if (isTRUE(ctx$n_within >= 10))
     tags$p(class = "gid-hint", style = "margin:.35rem 0 0",
       sprintf(paste0("For scale: same-animal pairs (two samples %s places in one animal) ",
                      "differ at a median of %s of loci, and 95%% of them at %s or less; that is ",
@@ -527,7 +538,7 @@ gid_rival_block <- function(row, all_pts, ctx, mm, ev = list(),
       kv("Sample", tags$code(rv), if (!is.na(who)) hint(sprintf(" (%s)", who))),
       kv("Loci that differ", diff_txt,
          if (is.finite(hard) && hard > 0)
-           hint(sprintf("; no allele shared at %d", hard))),
+           more(sprintf("; no allele shared at %d", hard))),
       if (is.finite(post))
         kv("Probability same animal", fmt_p(post),
            if (is.finite(post_cut)) hint(sprintf(" (match at %s)", post_cut))),
@@ -540,10 +551,10 @@ gid_rival_block <- function(row, all_pts, ctx, mm, ev = list(),
              hint(sprintf(" (match above %.1f)", log10(lambda_cut)))),
       kv("Distance apart", fmt_d(d_m),
          if (is.finite(F_d))
-           hint(sprintf("; %s of same-animal pairs are farther apart", pct(1 - F_d)))),
+           more(sprintf("; %s of same-animal pairs are farther apart", pct(1 - F_d)))),
       if (is.finite(typical))
         kv("Same-animal pairs", sprintf("typically %s apart", fmt_d(typical)),
-           if (is.finite(range_m)) hint(sprintf("; 95%% within %s", fmt_d(range_m))))),
+           if (is.finite(range_m)) more(sprintf("; 95%% within %s", fmt_d(range_m))))),
     scale_note,
     verdict,
     if (!nrow(b)) tags$p(class = "gid-hint",
