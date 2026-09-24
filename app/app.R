@@ -431,8 +431,21 @@ ui <- page_navbar(
       accordion_panel(
         "Settings shared by every method", value = "shared", icon = icon("sliders"),
         numericInput("min_loci", "Minimum loci compared per pair", 15, 1, 500, 1),
+        hint("How much overlap two samples need before they may be called the ",
+             "same animal. Pairs sharing fewer called loci than this are left ",
+             "unmatched rather than guessed at. Too low and samples match on ",
+             "thin evidence; too high and real recaptures are never compared."),
+
         numericInput("min_sample_call", "Minimum sample call rate", 0.5, 0, 1, 0.05),
+        hint("Drops a whole sample that was called at fewer than this fraction ",
+             "of loci. This is the curation step, and it is why you can upload ",
+             "raw data: a sample with almost no calls matches nothing, so left ",
+             "in it becomes a phantom individual and inflates your count."),
+
         numericInput("min_locus_call", "Minimum locus call rate", 0.25, 0, 1, 0.05),
+        hint("Drops a whole locus that worked in fewer than this fraction of ",
+             "samples. Applied before the sample filter, so a marker that failed ",
+             "across the board cannot drag otherwise good samples below the line."),
         checkboxInput("drop_flagged", "Treat quality-flagged calls as missing", FALSE),
         hint("Cells like ", tags$code("CT*"), " carry a flag from your genotyping ",
              "pipeline. By default the flag is stripped and the call kept. Ticking ",
