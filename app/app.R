@@ -47,6 +47,17 @@ theme_gid <- function() {
 
 hint <- function(...) tags$p(class = "gid-hint", ...)
 
+## A slider silently clamps a value past its end, which would leave the analysis
+## running on a different error rate from the one reported beside it. Widen the
+## range instead. The upper ends here match the sliders' own.
+GID_RATE_MAX <- c(dropout = 0.20, false_allele = 0.10)
+gid_set_rate <- function(session, id, v) {
+  v <- suppressWarnings(as.numeric(v))
+  if (length(v) == 1 && is.finite(v) && v > GID_RATE_MAX[[id]])
+    updateSliderInput(session, id, value = v, max = ceiling(v * 20) / 20)
+  else updateSliderInput(session, id, value = v)
+}
+
 ## One place describing every method: drives the picker, the sidebar sections,
 ## and the explainer at the top of the Individuals tab.
 GID_METHODS <- list(
@@ -321,7 +332,7 @@ ui <- page_navbar(
                      selectInput("sheet", "Worksheet", choices = NULL)),
 
     selectInput("id_col", "Sample ID column", choices = NULL),
-    selectizeInput("group_col", "Analyse separately by (optional)", choices = NULL,
+    selectizeInput("group_col", "Analyze separately by (optional)", choices = NULL,
                    options = list(placeholder = "e.g. species, study area")),
     hint("Blocking stops samples from different species or populations ",
          "from ever being called the same animal, and keeps allele frequencies separate."),
@@ -338,7 +349,7 @@ ui <- page_navbar(
                      options = list(placeholder = "e.g. consensus")),
       hint("Exclude any summary rows, such as a pre-computed consensus. ",
            "Everything left is treated as one PCR replicate."),
-      radioButtons("rep_mode", "Genotypes to analyse",
+      radioButtons("rep_mode", "Genotypes to analyze",
                    c("Use every replicate observation (recommended)" = "reps",
                      "Collapse to a consensus first" = "consensus"),
                    selected = "reps"),
@@ -422,8 +433,8 @@ ui <- page_navbar(
                    class = "btn-sm btn-outline-primary w-100"),
       uiOutput("est_error_note"),
       hint("Guessing these is the weakest part of the analysis. If you uploaded ",
-           "replicates the app can measure them properly; if not it can at least ",
-           "get the order of magnitude. See ", tags$b("Measuring your own error rates"),
+           "replicates, the app can measure them properly; if not, it can at least ",
+           "get the order of magnitude right. See ", tags$b("Measuring your own error rates"),
            " on the Methods tab.")),
 
     accordion(
@@ -439,8 +450,8 @@ ui <- page_navbar(
         numericInput("min_sample_call", "Minimum sample call rate", 0.5, 0, 1, 0.05),
         hint("Drops a whole sample that was called at fewer than this fraction ",
              "of loci. This is the curation step, and it is why you can upload ",
-             "raw data: a sample with almost no calls matches nothing, so left ",
-             "in it becomes a phantom individual and inflates your count."),
+             "raw data: a sample with almost no calls matches nothing, so, left ",
+             "in, it becomes a phantom individual and inflates your count."),
 
         numericInput("min_locus_call", "Minimum locus call rate", 0.25, 0, 1, 0.05),
         hint("Drops a whole locus that worked in fewer than this fraction of ",
@@ -466,23 +477,23 @@ ui <- page_navbar(
              "answer moves, some clusters are held together by one edge.")),
       accordion_panel(
         "Which methods to run", value = "which", icon = icon("list-check"),
-        hint("The comparison tab runs everything ticked here. Untick the slow ones ",
+        hint("The comparison tab runs everything checked here. Uncheck the slow ones ",
              "if you only care about your chosen method."),
         checkboxInput("run_sethi", "Sethi et al. (2016)", TRUE),
         checkboxInput("run_genalex", "GenAlEx Matches", TRUE))
     ),
 
     ## Map controls. Keyed on the open tab rather than the method, because the
-    ## map deliberately lets you colour by a model other than the one the
+    ## map deliberately lets you color by a model other than the one the
     ## Individuals tab is showing.
     conditionalPanel(
       "input.nav == 'Scat map'",
       tags$hr(),
       tags$p(class = "gid-label", "Map"),
-      selectInput("map_model", "Colour individuals by", choices = NULL),
+      selectInput("map_model", "Color individuals by", choices = NULL),
       hint("Switch models to see which samples change hands. The points stay ",
-           "put; only the colouring changes."),
-      checkboxInput("map_grey", "Grey out animals seen once", TRUE),
+           "put; only the coloring changes."),
+      checkboxInput("map_grey", "Gray out animals seen once", TRUE),
       uiOutput("map_coord_ui"),
       uiOutput("map_meta_ui"),
 
@@ -504,7 +515,7 @@ ui <- page_navbar(
       tags$p(class = "gid-label", "Link samples of the same animal"),
       radioButtons("map_link_style", NULL,
                    c("No links" = "none",
-                     "Spider (lines to centre)" = "spider",
+                     "Spider (lines to center)" = "spider",
                      "Polygon (convex hull)" = "polygon"),
                    selected = "none"),
       selectizeInput("map_link_who", "Which animals", choices = NULL,
@@ -681,7 +692,7 @@ ui <- page_navbar(
          hint("The full map. Download it as your capture history."),
          DTOutput("tbl_map")),
     card(card_header("Roster: one row per animal"),
-         hint("The same information the other way round \u2014 each animal and ",
+         hint("The same information the other way around \u2014 each animal and ",
               "the samples that make it up."),
          DTOutput("tbl_roster"))
   ),
@@ -827,7 +838,7 @@ server <- function(input, output, session) {
       "across two field seasons, and coordinates.",
       tags$div(style = "margin-top:.3rem",
         tags$b("Try this first: "), "press ", tags$b("Estimate from replicates"),
-        ". The data was simulated at ", tags$code("dropout 0.015"), " and ",
+        ". The data were simulated at ", tags$code("dropout 0.015"), " and ",
         tags$code("false allele 0.002"), " per reaction. Dropout comes back close ",
         "to 0.015; the false-allele estimate reads a little high, around 0.005, ",
         "with an interval that still covers 0.002 \u2014 that is the family group ",
@@ -928,7 +939,7 @@ server <- function(input, output, session) {
   })
 
   ## Replicates the file contains, independent of whether the user chose to
-  ## analyse with them. Error rates can always be measured from replicates that
+  ## analyze with them. Error rates can always be measured from replicates that
   ## exist, even if the analysis is running on consensus calls.
   reps_available <- reactive({
     df <- raw()
@@ -983,8 +994,8 @@ server <- function(input, output, session) {
     }
     err_est(c(e, list(applied_dropout = d, applied_false = f, converted = converted)))
     if (is.na(f)) f <- max(0.001, round(d / 3, 3))
-    updateSliderInput(session, "dropout", value = round(d, 3))
-    updateSliderInput(session, "false_allele", value = round(f, 3))
+    gid_set_rate(session, "dropout", round(d, 3))
+    gid_set_rate(session, "false_allele", round(f, 3))
   })
 
   output$est_error_note <- renderUI({
@@ -1000,7 +1011,7 @@ server <- function(input, output, session) {
                   e$false_allele, e$false_ci[1], e$false_ci[2])),
         tags$div(style = "margin-top:.3rem",
           if (isTRUE(e$converted)) tagList(
-            "You are analysing consensus calls, so the sliders were set to the ",
+            "You are analyzing consensus calls, so the sliders were set to the ",
             "much smaller residual rate that survives the multi-tube rule: ",
             tags$code(sprintf("dropout %.4f, false allele %.4f",
                               e$applied_dropout, e$applied_false)), ".")
@@ -1015,7 +1026,7 @@ server <- function(input, output, session) {
           "Treat this as the right order of magnitude, not a number to report. ",
           "Inbreeding and population structure push it up; false alleles push it ",
           "down by manufacturing heterozygotes, so it is not a ceiling either. ",
-          "The false-allele rate cannot be got this way at all and has been set ",
+          "The false-allele rate cannot be estimated this way at all and has been set ",
           "to a third of the dropout estimate."),
         tags$div(style = "margin-top:.3rem",
           tags$b("To measure it properly, genotype some samples twice"), " and ",
@@ -1081,7 +1092,7 @@ server <- function(input, output, session) {
     blank <- gid_blank_ids(df, input$id_col)
     if (any(blank)) df <- df[!blank, , drop = FALSE]
     validate(need(nrow(df) > 0, paste(
-      "Every row has a blank", input$id_col, "- choose a different Sample ID column.")))
+      "Every row has a blank", input$id_col, "\u2014 choose a different Sample ID column.")))
     ids <- as.character(df[[input$id_col]])
     sep <- gid_guess_sep(df, exclude = input$id_col)
     use_reps <- isTRUE(has_reps()) && identical(input$rep_mode, "reps") &&
@@ -1173,7 +1184,7 @@ server <- function(input, output, session) {
     bad <- function(x) tags$div(class = "gid-flag", x)
 
     ## p$raw_gt has one row per SAMPLE; p$df has one row per REACTION on a
-    ## replicate file, so the two cannot be compared cell for cell. Normalise the
+    ## replicate file, so the two cannot be compared cell for cell. Normalize the
     ## uploaded rows themselves instead -- gid_norm_gt() is column-wise and keeps
     ## every row, so the shapes always match.
     lcols  <- colnames(p$raw_gt)
@@ -1184,7 +1195,7 @@ server <- function(input, output, session) {
     nre <- sum(gsub("/", "", norm_m) !=
                  toupper(gsub("[*?!#]", "", as.matrix(p$df[, lcols]))), na.rm = TRUE)
     if (nre > 0) f <- c(f, list(bad(sprintf(
-      "%d genotype cells had their two alleles written in the other order (AG vs GA). They are now normalised; compared as raw text they would have counted as mismatches.", nre))))
+      "%d genotype cells had their two alleles written in the other order (AG vs GA). They are now normalized; compared as raw text they would have counted as mismatches.", nre))))
 
     nflag <- sum(grepl("[*?!#]", as.matrix(p$df[, lcols])))
     if (nflag > 0) f <- c(f, list(bad(sprintf(
@@ -1192,8 +1203,8 @@ server <- function(input, output, session) {
       if (isTRUE(input$drop_flagged)) "discarded as missing"
       else "the flag was stripped and the call kept",
       if (isTRUE(input$drop_flagged))
-        "Untick \"Treat quality-flagged calls as missing\" in the sidebar to keep them instead."
-      else "If your pipeline uses the flag to mean \"low confidence\", tick \"Treat quality-flagged calls as missing\" in the sidebar and re-run to see how much it moves the answer."))))
+        "Uncheck \"Treat quality-flagged calls as missing\" in the sidebar to keep them instead."
+      else "If your pipeline uses the flag to mean \"low confidence\", check \"Treat quality-flagged calls as missing\" in the sidebar and re-run to see how much it moves the answer."))))
 
     nblank <- sum(gid_blank_ids(raw(), input$id_col))
     if (nblank > 0) {
@@ -1215,7 +1226,7 @@ server <- function(input, output, session) {
     on_reps <- isTRUE(has_reps()) && nzchar(input$rep_col %||% "")
     dupn <- sum(duplicated(as.character(p$df[[input$id_col]])))
     if (dupn > 0 && !on_reps) f <- c(f, list(bad(sprintf(
-      "%d duplicated sample IDs. They were kept and suffixed with #1, #2 -- if these are the same extract run twice they are a useful positive control, since any correct method must put them together.", dupn))))
+      "%d duplicated sample IDs. They were kept and numbered #1, #2, and so on. If these are the same extract run twice, they are a useful positive control: any correct method must put them together.", dupn))))
     if (on_reps) f <- c(f, list(ok(sprintf(
       "%d rows for %d samples, read as replicate reactions from the %s column. %s",
       nrow(p$df), nrow(p$gt), input$rep_col,
@@ -1252,7 +1263,7 @@ server <- function(input, output, session) {
       sprintf(paste("%d samples were not tested: they are called at under 75%% of the",
                     "panel, and a patchy genotype has a noisy heterozygosity that clears",
                     "any fixed threshold by chance. Eriksson et al. required 77%% before",
-                    "analysing anything, for this reason."), n_skip))
+                    "analyzing anything, for this reason."), n_skip))
     if (!n_bad) return(tags$div(class = "gid-flag gid-ok",
       tags$b("No sample looks like a mixture. "),
       sprintf("Across %d tested samples the largest heterozygosity excess is %.3f, under the %s threshold.",
@@ -1268,7 +1279,7 @@ server <- function(input, output, session) {
       tags$div(style = "margin-top:.4rem",
         if (length(p$dropped_mixtures))
           sprintf("These %d are currently excluded from the analysis.", length(p$dropped_mixtures))
-        else tagList("They are ", tags$b("included"), " right now. Tick ",
+        else tagList("They are ", tags$b("included"), " right now. Check ",
                      tags$b("Exclude samples that look like two animals"),
                      " in the sidebar to drop them and see how much the count moves.")),
       tags$div(class = "gid-hint", style = "margin-top:.4rem",
@@ -1422,7 +1433,7 @@ server <- function(input, output, session) {
     r <- res(); req(r)
     m <- r$methods[[input$method]]
     validate(need(!is.null(m), sprintf(
-      "%s was not run. Tick it under \"Which methods to run\" in the sidebar, then press Identify individuals.",
+      "%s was not run. Check it under \"Which methods to run\" in the sidebar, then press Identify individuals.",
       GID_METHODS[[input$method]]$label)))
     m
   })
@@ -1470,7 +1481,7 @@ server <- function(input, output, session) {
               s$median_samples, s$mean_samples, min(n), max(n)),
       tags$b("Recaptures per animal "), "(samples after the first): ",
       sprintf("median %g, mean %.2f. ", s$median_recaptures, s$mean_recaptures),
-      sprintf("Overall recapture rate %.0f%% \u2014 that share of your samples were repeats of an animal already seen. ",
+      sprintf("Overall recapture rate %.0f%%: that share of your samples were repeats of an animal already seen. ",
               100 * s$recapture_rate),
       if (s$mean_samples > 1.5 * max(s$median_samples, 1))
         tags$span(style = "color:#c1502e",
@@ -1577,8 +1588,8 @@ server <- function(input, output, session) {
         e <- err_est(); req(e)
         d <- e$applied_dropout %||% e$dropout
         f <- e$applied_false   %||% e$false_allele
-        updateSliderInput(session, "dropout", value = round(d, 4))
-        updateSliderInput(session, "false_allele", value = round(f, 4))
+        gid_set_rate(session, "dropout", round(d, 4))
+        gid_set_rate(session, "false_allele", round(f, 4))
       })
     showNotification("Setting changed. Press Identify individuals to re-run.",
                      type = "message", duration = 6)
@@ -1612,7 +1623,7 @@ server <- function(input, output, session) {
     r <- tryCatch(res(), error = function(e) NULL); req(r)
     if (is.null(r$methods$sethi))
       return(tags$div(class = "gid-flag",
-        "Sethi was not run, so there is nothing to compare. Tick it under ",
+        "Sethi was not run, so there is nothing to compare. Check it under ",
         tags$b("Which methods to run"), " in the sidebar."))
     d <- tryCatch(lr_sethi(), error = function(e) NULL)
     n_lr <- length(unique(r$methods$probabilistic$assignment$individual))
@@ -1687,8 +1698,8 @@ server <- function(input, output, session) {
     if (!length(mx) || max(mx) >= input$post_cut) return(NULL)
     tags$div(class = "gid-flag", style = "margin-bottom:1rem",
       tags$strong("Your acceptance threshold is beyond what this panel can reach. "),
-      sprintf(paste0("The most similar pair in this dataset only reaches a posterior of %s ",
-                     "(log10 LR %.2f) against a %s alternative -- %d loci carry a finite ",
+      sprintf(paste0("The most similar pair in this dataset reaches a posterior of only %s ",
+                     "(log10 LR %.2f) against a %s alternative, because %d loci carry a finite ",
                      "amount of evidence. At a cutoff of %s nothing can match, so every ",
                      "sample is being reported as its own individual. Lower the cutoff, add ",
                      "loci, or compare against a less demanding alternative."),
@@ -1721,11 +1732,11 @@ server <- function(input, output, session) {
     if (!is.null(pp$log10_LR))
       list(v = pp$log10_LR, cut = suppressWarnings(min(pp$log10_LR[pp$posterior_same >= input$post_cut])),
            x = "log10 likelihood ratio", kind = "lr",
-           note = sprintf("Positive values favour one animal. Alternative hypothesis: %s.",
+           note = sprintf("Positive values favor one animal. Alternative hypothesis: %s.",
                           gsub("_", " ", input$kinship)))
     else if (!is.null(pp$log10_lambda))
       list(v = pp$log10_lambda, cut = log10(input$lambda_cut), x = "log10 lambda", kind = "lr",
-           note = "Positive values favour one animal over the best competing relationship.")
+           note = "Positive values favor one animal over the best competing relationship.")
     else
       list(v = pp$n_mismatch, cut = input$max_mismatch + 0.5, x = "Loci that differ",
            kind = "mm",
@@ -1857,19 +1868,8 @@ server <- function(input, output, session) {
 
   ## ---- sample -> individual map with per-sample confidence ----------------
   conf <- reactive({
-    r <- res(); req(r); b <- best(); req(b)
-    ## A method that clusters internally exposes no per-pair score, so borrow
-    ## the locus-mismatch counts, which are a property of the data.
-    if (is.null(b$pairs) ||
-        (!is.null(b$by_group) &&
-         all(vapply(b$by_group, function(e) is.null(e$pairs), TRUE)))) {
-      src <- r$methods$exact
-      b <- if (!is.null(b$by_group)) {
-        b$by_group <- Map(function(e, s) { e$pairs <- s$pairs; e },
-                          b$by_group, src$by_group[names(b$by_group)]); b
-      } else { b$pairs <- src$pairs; b }
-    }
-    gid_sample_confidence(b, gt = r$gt, pid_tab = pid(),
+    r <- res(); req(r); req(best())
+    gid_method_confidence(r, input$method, pid_tab = pid(),
                           post_cut = input$post_cut, min_loci = input$min_loci)
   })
 
@@ -2129,7 +2129,7 @@ server <- function(input, output, session) {
       "genoID settings\n",
       "----------------------------------------\n",
       "file                 %s\n",
-      "samples analysed     %d\n",
+      "samples analyzed     %d\n",
       "loci used            %d  (%s)\n",
       "loci dropped by you  %s\n",
       "grouped by           %s\n",
@@ -2182,7 +2182,7 @@ server <- function(input, output, session) {
       d <- try(data_fn(), silent = TRUE)
       if (inherits(d, "try-error") || is.null(d))
         return(showNotification(
-          "Nothing to download yet - press Identify individuals first.",
+          "Nothing to download yet. Press Identify individuals first.",
           type = "warning"))
       send_file(sprintf("genoID_%s_%s.csv", name, format(Sys.Date())), as_csv(d))
     })
@@ -2194,7 +2194,7 @@ server <- function(input, output, session) {
     prep = prep, restored_view = restored_view, pending_map = pending_map))
 
   map_api <- gid_map_server(input, output, session, list(
-    res = res, best = best, conf = conf, prep = prep, run_status = run_status,
+    res = res, best = best, conf = conf, pid = pid, prep = prep, run_status = run_status,
     send_file = send_file, run_count = run_count, source_name = source_name,
     restored_view = restored_view, pending_map = pending_map))
 

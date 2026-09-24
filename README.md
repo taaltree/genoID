@@ -30,7 +30,7 @@ Everything downloads as CSV, plus a zip of the whole run, the settings you used,
 and an R script that reproduces it.
 
 **Sharing a map.** *Shareable interactive map* writes the map you are looking
-at to a single HTML file — points, links, colours and every popup embedded.
+at to a single HTML file — points, links, colors and every popup embedded.
 Send that file to a collaborator and they pan, zoom and click it in any
 browser, with no genoID and no R. Put it on any web host or shared drive and it
 becomes a link. Basemap tiles still come from the internet, so offline it draws
@@ -58,8 +58,8 @@ anywhere — the file is written and read in your browser.
 
 ### Optional: where the sample was found
 
-Two scats a few hundred metres apart are more likely to be one animal than two
-scats twenty kilometres apart, because animals have home ranges. Augustine et
+Two scats a few hundred meters apart are more likely to be one animal than two
+scats twenty kilometers apart, because animals have home ranges. Augustine et
 al. ([2020, *PNAS*](https://www.pnas.org/doi/10.1073/pnas.2000247117)) turned
 that into the **genotype spatial partial identity model (gSPIM)**, which
 resolves identity, genotyping error and density together inside a spatial
@@ -212,7 +212,7 @@ If your file also carries pre-computed `consensus` rows, list that label under
 **Row labels to exclude** so it is not counted as a fourth reaction — the app
 finds and pre-selects labels like `consensus` for you.
 
-A Format B file can be analysed **either way**, and you can switch between them
+A Format B file can be analyzed **either way**, and you can switch between them
 in the sidebar to see whether it changes anything.
 
 ### Writing a genotype
@@ -221,7 +221,7 @@ in the sidebar to see whether it changes anything.
 |---|---|---|
 | SNP genotype | `AG`, `CC`, `T/C` | Two alleles in one cell; separator optional |
 | Microsatellite | `120/124`, `120\|124` | Separator **required**, so the two sizes can be told apart |
-| Missing | `00`, `NA`, `-`, `?`, blank | All recognised. Missing loci are skipped, not counted against a pair |
+| Missing | `00`, `NA`, `-`, `?`, blank | All recognized. Missing loci are skipped, not counted against a pair |
 | Allele order | `AG` = `GA` | Sorted before comparison, so reversed cells never become false differences |
 | Quality flags | `AG*`, `CT?` | Flag stripped, genotype kept. If a flag means "do not trust this", set those cells to missing first |
 
@@ -320,7 +320,7 @@ are excluded from allele-frequency estimation as well as from matching.
 1. **Remove species-diagnostic and sex markers** from the locus list. They are
    near-fixed within a species, so they add no power and distort the allele
    frequencies every probability depends on.
-2. **Set "analyse separately by"** to your species or population column, so
+2. **Set "analyze separately by"** to your species or population column, so
    samples from different groups are never compared and each gets its own
    frequencies.
 
@@ -376,9 +376,9 @@ sidebar; the app picks the best method your data supports.
 
 Two replicates on a *subset* of samples is enough — you don't have to replicate
 everything, and the app uses whatever replicates exist even when you're
-analysing consensus calls.
+analyzing consensus calls.
 
-> **The rate depends on what you're analysing.** Raw replicates want the
+> **The rate depends on what you're analyzing.** Raw replicates want the
 > per-reaction rate (a few percent). Consensus calls want the much smaller
 > residual rate that survives the multi-tube rule (a few tenths of a percent) —
 > a factor of ~300 apart on this panel. The app measures the per-reaction rate

@@ -57,12 +57,12 @@ gt_all <- gid_matrix(raw, "row_key", id_loci)          # ID panel
 gt_dia <- gid_matrix(raw, "row_key", DIAG_LOCI)        # species panel
 sex    <- setNames(gid_norm_gt(raw[[SEX_LOCUS]]), raw$row_key)
 
-## Allele-order normalisation: how many cells would have produced a false
+## Allele-order normalization: how many cells would have produced a false
 ## mismatch if compared as raw strings?
 raw_str  <- toupper(gsub("[*?!#]", "", as.matrix(raw[, all_loci])))
 norm_str <- gsub("/", "", gid_matrix(raw, "row_key", all_loci))
 n_reordered <- sum(raw_str != norm_str & !is.na(norm_str))
-say("Genotype cells whose allele order was normalised (%s): %d",
+say("Genotype cells whose allele order was normalized (%s): %d",
     paste(unique(all_loci[which(colSums(raw_str != norm_str & !is.na(norm_str)) > 0)]),
           collapse = ", "), n_reordered)
 say("Quality-flagged (*) genotype cells retained: %d",

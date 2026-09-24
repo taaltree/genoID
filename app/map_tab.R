@@ -1,4 +1,4 @@
-## map_tab.R -- spatial view of samples, coloured by individual ---------------
+## map_tab.R -- spatial view of samples, colored by individual ---------------
 ##
 ## Everything here is driven by whatever the chosen method decided, so switching
 ## the model in the picker recolours the same points rather than recomputing
@@ -37,7 +37,7 @@ gid_find_coord_cols <- function(df) {
        utm_n = pick(GID_UTMN_PAT, 0, 1e7))
 }
 
-#' Normalise however a lab writes sex into M / F / U.
+#' Normalize however a lab writes sex into M / F / U.
 #'
 #' Deliberately conservative: numeric codings (1/2) are left unknown, because
 #' 1 = female and 1 = male are both in common use and guessing wrong would
@@ -137,7 +137,7 @@ gid_sort_animals <- function(x) {
 #' Inverse UTM (WGS84) -- easting/northing to decimal degrees.
 #'
 #' Standard inverse transverse Mercator on the WGS84 ellipsoid, series form
-#' (Snyder 1987, eqns 8-17 to 8-25). Accurate to well under a metre inside a
+#' (Snyder 1987, eqns 8-17 to 8-25). Accurate to well under a meter inside a
 #' zone, which is far finer than any GPS fix on a scat.
 gid_utm_to_ll <- function(easting, northing, zone, south = FALSE) {
   a <- 6378137; f <- 1 / 298.257223563
@@ -163,9 +163,9 @@ gid_utm_to_ll <- function(easting, northing, zone, south = FALSE) {
   list(lat = lat * 180/pi, lon = (zone * 6 - 183) + lon * 180/pi)
 }
 
-#' A colour per individual. Individuals seen more than once get saturated hues
-#' spread around the wheel; the order is interleaved so neighbouring labels do
-#' not land on neighbouring hues.
+#' A color per individual. Individuals seen more than once get saturated hues
+#' spread around the wheel; the order is interleaved so neighboring labels do
+#' not land on neighboring hues.
 gid_ind_colours <- function(inds, n_samples = NULL, grey_singletons = TRUE) {
   inds <- unique(inds)
   multi <- if (is.null(n_samples) || !grey_singletons) inds
@@ -202,7 +202,9 @@ gid_map_tab_ui <- function() {
       "output.has_coords == true",
       uiOutput("map_empty"),
       layout_columns(
-        col_widths = c(8, 4),
+        ## Stack below a laptop-width screen: beside the sidebar, a third of
+        ## the remaining width is too narrow for the scat details to read.
+        col_widths = breakpoints(sm = c(12, 12), lg = c(7, 5), xl = c(8, 4)),
         card(
           card_header(
             "Where each animal was sampled",
@@ -211,7 +213,7 @@ gid_map_tab_ui <- function() {
           leaflet::leafletOutput("geo_map", height = "560px")),
         tagList(
           card(card_header("Selected scat"), uiOutput("map_detail")),
-          card(card_header("Colour key"), uiOutput("map_legend")))),
+          card(card_header("Color key"), uiOutput("map_legend")))),
       card(
         card_header("Mapped samples"),
         DTOutput("tbl_geo"))))
@@ -297,9 +299,9 @@ gid_widget_html <- function(widget, title = "genoID map") {
 #' A map marker as an inline SVG data URI.
 #'
 #' Shapes follow the pedigree convention every geneticist already reads without
-#' a legend: circle female, square male, diamond unknown. Colour still carries
-#' the individual, so shape and colour are independent channels and the map
-#' stays readable in greyscale or to a colour-blind reader.
+#' a legend: circle female, square male, diamond unknown. Color still carries
+#' the individual, so shape and color are independent channels and the map
+#' stays readable in grayscale or to a color-blind reader.
 gid_marker_svg <- function(shape, fill, size = 17, stroke = "#33383d") {
   h <- size / 2
   r <- size * 0.33
@@ -317,83 +319,232 @@ gid_marker_svg <- function(shape, fill, size = 17, stroke = "#33383d") {
           jsonlite::base64_enc(charToRaw(svg)))
 }
 
-#' The nearest genetic rival, and how far away it was found.
+#' Yardsticks for reading a sample against its closest other animal.
+#'
+#' "Differs at 4 loci" means nothing on its own: it depends on how many loci
+#' there are and how noisy the genotyping was. So the pair is read against two
+#' distributions from this same dataset -- how much two samples grouped into
+#' ONE animal differ (that is genotyping error at work), and how much each
+#' sample's closest OTHER animal differs.
+#'
+#' @param asg assignment (sample, individual) that defines "one animal" for the
+#'   error baseline
+#' @param gt genotype matrix
+#' @param rivals data.frame(sample, rival_sample) under the map's model
+#' @param pts mapped samples (sample, animal, lon, lat), for typical distances
+#' @param min_loci pairs typed at fewer loci than this are left out
+#' @param baseline how to name the model behind `asg`, in words
+gid_rival_context <- function(asg, gt, rivals, pts, min_loci = 1,
+                              baseline = "the model") {
+  qq <- function(x, p)
+    if (length(x)) unname(stats::quantile(x, p, na.rm = TRUE)) else NA_real_
+
+  by <- split(as.character(asg$sample), asg$individual)
+  by <- by[lengths(by) > 1]
+  pr <- do.call(rbind, lapply(by, function(s) {
+    k <- utils::combn(length(s), 2)
+    data.frame(a = s[k[1, ]], b = s[k[2, ]], stringsAsFactors = FALSE)
+  }))
+  ## One huge cluster would dominate the baseline and slow the tab down. Even
+  ## thinning keeps the shape without drawing random numbers.
+  if (!is.null(pr) && nrow(pr) > 20000)
+    pr <- pr[unique(round(seq(1, nrow(pr), length.out = 20000))), , drop = FALSE]
+  w <- if (is.null(pr)) numeric(0) else {
+    x <- gid_pair_mismatch(gt, pr$a, pr$b)
+    x$prop_mismatch[x$n_compared >= min_loci]
+  }
+
+  rv <- rivals[!is.na(rivals$rival_sample), , drop = FALSE]
+  r <- gid_pair_mismatch(gt, rv$sample, rv$rival_sample)
+  r <- r$prop_mismatch[r$n_compared >= min_loci]
+
+  sp <- split(pts[, c("lon", "lat")], pts$animal)
+  dd <- unlist(lapply(sp, function(x) {
+    if (nrow(x) < 2) return(NULL)
+    k <- utils::combn(nrow(x), 2)
+    gid_dist_m(x$lon[k[1, ]], x$lat[k[1, ]], x$lon[k[2, ]], x$lat[k[2, ]])
+  }), use.names = FALSE)
+
+  list(baseline = baseline,
+       n_within = length(w), within_median = qq(w, 0.5), within_q95 = qq(w, 0.95),
+       n_rival = length(r), rival_median = qq(r, 0.5),
+       typical_m = qq(dd, 0.5), range_m = qq(dd, 0.95),
+       dist_sorted = sort(dd[is.finite(dd)]))
+}
+
+#' The closest other animal: how different it is genetically, and how far away
+#' it was found.
 #'
 #' A false split leaves a signature two ways at once: the sample's closest
 #' genetic match sits in a DIFFERENT individual, and that sample was picked up
-#' nearby. Either alone is weak -- animals have neighbours, and relatives look
+#' nearby. Either alone is weak -- animals have neighbors, and relatives look
 #' alike -- but together they are the pattern a split produces, because both
 #' halves came off the same animal in the same place.
 #'
-#' Distance is judged against this dataset rather than a fixed number: the
-#' comparison that matters is how far apart samples of the SAME animal usually
-#' are here, which depends on home-range size and how the survey was walked.
-gid_rival_block <- function(row, all_pts, post_cut = NA_real_) {
+#' Both yardsticks come from this dataset rather than fixed numbers: genetic
+#' difference is read against how much two samples of one animal differ here,
+#' and distance against how far apart samples of one animal usually are, which
+#' depends on home-range size and how the survey was walked.
+#'
+#' @param row the clicked sample: one row of the map's point table
+#' @param all_pts every mapped sample, to find the rival's position
+#' @param ctx gid_rival_context() output
+#' @param mm gid_pair_mismatch() for the sample and its rival
+#' @param ev the model's own score for the pair: list(scale, posterior,
+#'   log10_lr, log10_lambda), any of which may be NULL or NA
+#' @param kin_label what the likelihood ratio is weighed against, in words
+gid_rival_block <- function(row, all_pts, ctx, mm, ev = list(),
+                            post_cut = NA_real_, lambda_cut = NA_real_,
+                            kin_label = "full siblings") {
   fmt_d <- function(m) if (!is.finite(m)) "unknown" else
     if (m < 1000) sprintf("%.0f m", m) else sprintf("%.1f km", m / 1000)
+  pct <- function(p) if (!is.finite(p)) "?" else sprintf("%.0f%%", 100 * p)
+  ## Rounded down near 1, so a posterior just short of the cutoff never
+  ## prints as the cutoff itself.
+  fmt_p <- function(p) if (!is.finite(p)) "not available" else
+    if (p >= 0.99) sprintf("%.4f", floor(p * 1e4) / 1e4)
+    else if (p >= 0.001) sprintf("%.3f", p)
+    else if (p > 0) sprintf("%.1e", p) else "below 1e-300"
+  chance <- function(p) sprintf(if (p >= 0.1) "%.0f%%" else "%.1f%%", 100 * p)
+  num <- function(x) suppressWarnings(as.numeric(x %||% NA)[1])
+  kv <- function(k, ...) tags$tr(tags$td(tags$b(k)), tags$td(...))
+  hint <- function(...) tags$span(class = "gid-hint", ...)
 
   rv <- row$rival_sample[1]
-  sc <- row$rival[1]
-  scale <- attr(all_pts, "scale")
-  lab <- switch(as.character(scale),
-                posterior = "posterior that they are the same animal",
-                lambda    = "lambda",
-                mismatch  = "similarity",
-                "score")
-
   if (is.null(rv) || is.na(rv) || !nzchar(rv))
-    return(tags$div(class = "gid-flag gid-ok", style = "margin-top:.5rem;font-size:.82rem",
-      tags$b("No close rival. "),
-      "No sample assigned to another animal comes near this one genetically, so ",
-      "nothing here looks like a split."))
+    return(tags$div(class = "gid-hint", style = "margin-top:.5rem",
+      tags$b("No other animal to compare. "),
+      "No sample assigned to another animal shares enough typed loci with this ",
+      "one to be compared, so a split cannot be checked from here."))
 
   b <- all_pts[all_pts$sample == rv, , drop = FALSE]
   d_m <- if (nrow(b)) gid_dist_m(row$lon[1], row$lat[1], b$lon[1], b$lat[1]) else NA_real_
+  typical <- num(ctx$typical_m); range_m <- num(ctx$range_m)
 
-  ## how far apart samples of one animal typically are, in this dataset
-  typical <- local({
-    v <- split(all_pts[, c("lon", "lat")], all_pts$animal)
-    dd <- unlist(lapply(v, function(x) {
-      if (nrow(x) < 2) return(NULL)
-      k <- utils::combn(nrow(x), 2)
-      gid_dist_m(x$lon[k[1, ]], x$lat[k[1, ]], x$lon[k[2, ]], x$lat[k[2, ]])
-    }), use.names = FALSE)
-    if (length(dd)) stats::median(dd, na.rm = TRUE) else NA_real_
-  })
+  k <- num(mm$n_mismatch); n <- num(mm$n_compared); p <- num(mm$prop_mismatch)
+  hard <- num(mm$n_mismatch_2allele)
+  q95 <- if (isTRUE(ctx$n_within >= 10)) num(ctx$within_q95) else NA_real_
+  post <- num(ev$posterior); lr <- num(ev$log10_lr); lam <- num(ev$log10_lambda)
+  scale <- as.character(ev$scale %||% NA)
 
-  gen_close <- identical(as.character(scale), "posterior") && is.finite(sc) && sc > 0.01
-  spa_close <- is.finite(d_m) && ((is.finite(typical) && d_m <= typical) || d_m < 1000)
+  ## Genetically close: no more different than genotyping error makes two
+  ## samples of one animal in this dataset, or -- with too few animals sampled
+  ## twice to learn that -- two loci or fewer. A model that still gives the
+  ## pair a real chance of being one animal counts too.
+  by_loci  <- is.finite(p) && (if (is.finite(q95)) p <= q95 else k <= 2)
+  by_model <- identical(scale, "posterior") && is.finite(post) && post > 0.01
+  gen_close <- by_loci || by_model
+  ## Where the distance falls among same-animal pairs: the share of them found
+  ## at least this far apart. Only the farthest 5% counts against a split -- a
+  ## median cut would call half of all true pairs "far" -- and with no animal
+  ## mapped twice there is nothing to judge distance by, so it is not used.
+  dd <- ctx$dist_sorted
+  F_d <- if (is.finite(d_m) && length(dd)) mean(dd <= d_m) else NA_real_
+  spa_close <- is.finite(d_m) && (d_m < 1000 || !is.finite(F_d) || F_d <= 0.95)
+
+  diff_txt <- if (is.finite(p)) sprintf("%d of %d loci typed in both (%s)", k, n, pct(p))
+              else "no locus typed in both"
+  why_close <- if (by_loci && k == 0)
+    sprintf("They match at all %d loci typed in both. ", n)
+  else if (by_loci)
+    sprintf("They differ at only %s, %s. ", diff_txt,
+            if (is.finite(q95))
+              sprintf("no more than genotyping error makes two samples of one animal differ here (up to %s)",
+                      pct(q95))
+            else "few enough for genotyping error alone to explain")
+  else sprintf("The model still gives a %s chance that they are the same animal. ",
+               chance(post))
+  held_apart <- if (identical(scale, "posterior") && is.finite(post) &&
+                    is.finite(post_cut) && post >= 0.5 && post < post_cut)
+    sprintf("The model kept them apart only because %s falls short of the %s it needs to join them. ",
+            fmt_p(post), post_cut)
+  advice <- if (is.finite(k) && k == 0 && !is.null(held_apart))
+      paste0("More loci would settle it. If many samples look like this, the cutoff ",
+             "is beyond what this panel can reach; see \u201cChoosing your posterior ",
+             "cutoff\u201d on the Individuals tab.")
+    else if (is.finite(k) && k == 0) "More loci would settle it."
+    else if (is.finite(k))
+      sprintf("Re-genotype both at the %s where they differ before reporting them as separate animals.",
+              if (k == 1) "locus" else sprintf("%d loci", k))
+  where_txt <- if (!is.finite(F_d)) ""
+    else if (F_d <= 0.5)
+      sprintf(", closer than most same-animal pairs here (%s of them are farther apart)", pct(1 - F_d))
+    else sprintf(", within the range one animal covers here (%s of same-animal pairs are farther apart)",
+                 pct(1 - F_d))
 
   verdict <- if (gen_close && spa_close)
     tags$div(class = "gid-flag", style = "margin-top:.4rem;font-size:.82rem",
-      tags$b("Worth a second look. "),
-      "This is the closest thing to a genetic match in the whole dataset, and it ",
-      "was found closer than samples of one animal usually are here. That is what ",
-      "a single animal split into two looks like. Re-amplify both at the loci ",
-      "where they differ before reporting them as separate animals.")
+      tags$b("Worth a second look. "), why_close, held_apart,
+      sprintf("They were found %s apart%s. ", fmt_d(d_m), where_txt),
+      if (isTRUE(F_d <= 0.5) || d_m < 1000)
+        "That is the pattern one animal split in two leaves. ",
+      advice)
+  else if (gen_close && !is.finite(d_m))
+    tags$div(class = "gid-flag", style = "margin-top:.4rem;font-size:.82rem",
+      tags$b("Worth a second look. "), why_close, held_apart,
+      "The other sample has no coordinates, so distance cannot help decide. ", advice)
   else if (gen_close)
     tags$div(class = "gid-hint", style = "margin-top:.4rem",
-      sprintf("Genetically the closest candidate, but %s away%s, which argues against a split.",
-              fmt_d(d_m),
-              if (is.finite(typical)) sprintf(" when samples of one animal here are typically %s apart",
-                                              fmt_d(typical)) else ""))
+      why_close, held_apart,
+      sprintf("But they were found %s apart, farther than 95%% of same-animal pairs here (within %s). ",
+              fmt_d(d_m), fmt_d(range_m)),
+      "That makes a split less likely, though a dispersing animal can travel that far.")
+  else if (!is.finite(p))
+    tags$div(class = "gid-hint", style = "margin-top:.4rem",
+      "These two could not be compared locus by locus.")
   else
     tags$div(class = "gid-hint", style = "margin-top:.4rem",
-      "Genetically well separated from every other animal, so the distance does ",
-      "not matter here.")
+      tags$b("Different animals. "),
+      sprintf("They differ at %s", diff_txt),
+      if (is.finite(q95))
+        sprintf(", more than genotyping error makes two samples of one animal differ here (up to %s)",
+                pct(q95))
+      else ", more than the two or fewer that would suggest a split",
+      ", so the distance between them does not matter.",
+      if ((isTRUE(F_d <= 0.5) || isTRUE(d_m < 1000)) && isTRUE(p < ctx$rival_median))
+        paste0(" They are more alike than most samples are to their closest other ",
+               "animal, and were found close together, which fits a relative ",
+               "sharing the area."))
 
+  scale_note <- if (isTRUE(ctx$n_within >= 10))
+    tags$p(class = "gid-hint", style = "margin:.35rem 0 0",
+      sprintf(paste0("For scale: same-animal pairs (two samples %s places in one animal) ",
+                     "differ at a median of %s of loci, and 95%% of them at %s or less; that is ",
+                     "what genotyping error does here. A sample's closest other animal differs ",
+                     "at a median of %s."),
+              ctx$baseline %||% "the model", pct(ctx$within_median), pct(ctx$within_q95),
+              pct(ctx$rival_median)))
+  else
+    tags$p(class = "gid-hint", style = "margin:.35rem 0 0",
+      "Too few animals were sampled more than once to measure how much genotyping ",
+      "error separates two samples of one animal here, so a difference at two loci ",
+      "or fewer is taken as the mark of a possible split.")
+
+  who <- if (nrow(b)) b$animal[1] else row$rival_individual[1] %||% NA
   tagList(
     tags$div(class = "gid-label", style = "margin-top:.7rem", "Closest other animal"),
     tags$table(class = "table table-sm gid-kv",
-      tags$tr(tags$td(tags$b("Sample")), tags$td(tags$code(rv),
-        if (nrow(b)) tags$span(class = "gid-hint", sprintf(" (%s)", b$animal[1])))),
-      tags$tr(tags$td(tags$b(lab)),
-              tags$td(if (is.finite(sc)) signif(sc, 4) else "not comparable",
-                      if (is.finite(post_cut) && identical(as.character(scale), "posterior"))
-                        tags$span(class = "gid-hint", sprintf(" (cutoff %s)", post_cut)))),
-      tags$tr(tags$td(tags$b("Distance apart")), tags$td(fmt_d(d_m))),
+      kv("Sample", tags$code(rv), if (!is.na(who)) hint(sprintf(" (%s)", who))),
+      kv("Loci that differ", diff_txt,
+         if (is.finite(hard) && hard > 0)
+           hint(sprintf("; no allele shared at %d", hard))),
+      if (is.finite(post))
+        kv("Probability same animal", fmt_p(post),
+           if (is.finite(post_cut)) hint(sprintf(" (match at %s)", post_cut))),
+      if (is.finite(lr))
+        kv("Likelihood ratio, log₁₀", sprintf("%.1f", lr),
+           hint(sprintf(" (same animal vs. %s)", kin_label))),
+      if (is.finite(lam))
+        kv("Sethi Λ, log₁₀", sprintf("%.1f", lam),
+           if (is.finite(lambda_cut) && lambda_cut > 0)
+             hint(sprintf(" (match above %.1f)", log10(lambda_cut)))),
+      kv("Distance apart", fmt_d(d_m),
+         if (is.finite(F_d))
+           hint(sprintf("; %s of same-animal pairs are farther apart", pct(1 - F_d)))),
       if (is.finite(typical))
-        tags$tr(tags$td(tags$b("Typical for one animal")), tags$td(fmt_d(typical)))),
+        kv("Same-animal pairs", sprintf("typically %s apart", fmt_d(typical)),
+           if (is.finite(range_m)) hint(sprintf("; 95%% within %s", fmt_d(range_m))))),
+    scale_note,
     verdict,
     if (!nrow(b)) tags$p(class = "gid-hint",
       "That sample has no coordinates, so the two cannot be compared in space."))
@@ -433,7 +584,7 @@ gid_leaflet_map <- function(d, cols, who = character(0), style = "none",
         m <- leaflet::addCircleMarkers(m, lng = cx, lat = cy, radius = 3.5,
                                        color = col, fillColor = col, weight = 1,
                                        fillOpacity = 1,
-                                       label = sprintf("%s centre", ind))
+                                       label = sprintf("%s center", ind))
       } else {
         h <- gid_hull(sset$lon, sset$lat)
         if (is.null(h)) next
@@ -451,8 +602,8 @@ gid_leaflet_map <- function(d, cols, who = character(0), style = "none",
   lab <- sprintf("<b>%s</b><br/>%s%s", d$sample, d$animal,
                  ifelse(d$n_samples > 1, sprintf(" (%d samples)", d$n_samples), ""))
 
-  ## Shape carries sex, colour carries the individual. Icons are built once per
-  ## distinct shape/colour/size combination rather than once per sample, so a
+  ## Shape carries sex, color carries the individual. Icons are built once per
+  ## distinct shape/color/size combination rather than once per sample, so a
   ## few thousand scats do not become a few thousand data URIs.
   sx  <- as.character(d$sex); sx[is.na(sx)] <- "U"
   fil <- unname(cols[d$animal])
@@ -695,7 +846,7 @@ gid_map_server <- function(input, output, session, deps) {
       "tab works the moment those columns are present.")
   })
 
-  ## ---- which model colours the map ----------------------------------------
+  ## ---- which model colors the map ----------------------------------------
   observeEvent(deps$res(), {
     r <- deps$res(); req(r)
     ch <- setNames(names(r$methods),
@@ -716,6 +867,20 @@ gid_map_server <- function(input, output, session, deps) {
     m$assignment
   })
 
+  ## Confidence under the model coloring the map. The Individuals tab's table is
+  ## reused when both show the same model; otherwise it is worked out again,
+  ## because a rival under one model can be a cluster-mate under another.
+  map_conf <- reactive({
+    r <- deps$res(); req(r)
+    key <- input$map_model %||% input$method
+    if (identical(key, input$method))
+      return(tryCatch(deps$conf(), error = function(e) NULL))
+    tryCatch(gid_method_confidence(
+      r, key, pid_tab = tryCatch(deps$pid(), error = function(e) NULL),
+      post_cut = input$post_cut, min_loci = input$min_loci),
+      error = function(e) NULL)
+  })
+
   pts <- reactive({
     g <- geo(); req(g)
     a <- map_assign()
@@ -724,7 +889,7 @@ gid_map_server <- function(input, output, session, deps) {
     req(nrow(g) > 0)
     tab <- table(a$individual)
     g$n_samples <- as.integer(tab[g$individual])
-    cf <- tryCatch(deps$conf(), error = function(e) NULL)
+    cf <- map_conf()
     g$status <- if (!is.null(cf)) as.character(cf$status[match(g$sample, cf$sample)]) else NA
     g$margin <- if (!is.null(cf)) cf$margin[match(g$sample, cf$sample)] else NA
     ## The strongest link to a sample assigned to a DIFFERENT animal. If that
@@ -732,13 +897,14 @@ gid_map_server <- function(input, output, session, deps) {
     k <- if (!is.null(cf)) match(g$sample, cf$sample) else NA
     g$rival        <- if (!is.null(cf)) cf$rival[k] else NA_real_
     g$rival_sample <- if (!is.null(cf)) as.character(cf$rival_sample[k]) else NA_character_
+    g$rival_individual <- if (!is.null(cf)) as.character(cf$rival_individual[k]) else NA_character_
     attr(g, "scale") <- if (!is.null(cf)) attr(cf, "scale") else NA_character_
 
     df  <- deps$prep()$df
     ids <- as.character(df[[input$id_col]])
 
     ## A replicate file holds several rows per sample and the first of them may
-    ## be the reaction that failed, so summarise over a sample's rows rather
+    ## be the reaction that failed, so summarize over a sample's rows rather
     ## than taking whichever row comes first.
     per_sample <- function(col, f) {
       if (!nzchar(col %||% "")) return(NULL)
@@ -786,7 +952,24 @@ gid_map_server <- function(input, output, session, deps) {
     d[keep, , drop = FALSE]
   })
 
-  ## Built from the unfiltered set so an animal keeps its colour when others
+  ## Yardsticks for the rival panel, worked out once per run and model rather
+  ## than on every click. "One animal" for the genotyping-error baseline comes
+  ## from the likelihood-ratio model whatever colors the map: it is the one
+  ## model built to expect error, so its clusters show what error does, where
+  ## an exact-match cluster differs at no locus by construction.
+  rival_ctx <- reactive({
+    r <- deps$res(); req(r)
+    d <- pts(); cf <- map_conf()
+    lr <- r$methods$probabilistic
+    base <- if (!is.null(lr)) lr$assignment else map_assign()
+    rivals <- if (is.null(cf)) data.frame(sample = character(0), rival_sample = character(0))
+              else cf[, c("sample", "rival_sample")]
+    gid_rival_context(base, r$gt, rivals, d, min_loci = input$min_loci %||% 1,
+                      baseline = if (!is.null(lr)) "the likelihood-ratio model"
+                                 else "this model")
+  })
+
+  ## Built from the unfiltered set so an animal keeps its color when others
   ## are hidden.
   pal <- reactive({
     d <- pts()
@@ -881,7 +1064,7 @@ gid_map_server <- function(input, output, session, deps) {
   ## leafletProxy(). Outputs on a hidden tab are suspended, so proxy messages
   ## sent before the tab was first opened are dropped on the floor -- which left
   ## the map tiled but empty. Drawing here means it is always complete the
-  ## moment it appears, at the cost of a redraw when the colouring changes.
+  ## moment it appears, at the cost of a redraw when the coloring changes.
   output$geo_map <- leaflet::renderLeaflet({
     d <- shown(); req(nrow(d) > 0)
 
@@ -936,7 +1119,7 @@ gid_map_server <- function(input, output, session, deps) {
         leaflet::addCircleMarkers(lng = b$lon[1], lat = b$lat[1], radius = 10,
                                   group = "selection", color = "#c1502e",
                                   weight = 2, fill = FALSE,
-                                  label = sprintf("%s - closest rival", rv))
+                                  label = sprintf("%s: closest other animal", rv))
     }
     invisible(p)
   })
@@ -975,7 +1158,23 @@ gid_map_server <- function(input, output, session, deps) {
         if (length(mates))
           tags$tr(tags$td(tags$b("Other samples")),
                   tags$td(paste(mates, collapse = ", ")))),
-      gid_rival_block(row, pts(), input$post_cut %||% NA_real_),
+      local({
+        rv <- row$rival_sample[1]
+        if (is.na(rv %||% NA)) return(gid_rival_block(row, pts(), list(), NULL))
+        prs <- deps$res()$methods[[input$map_model %||% input$method]]$pairs
+        hit <- if (is.null(prs) || !nrow(prs)) NA_integer_ else
+          which((prs$id1 == id & prs$id2 == rv) | (prs$id1 == rv & prs$id2 == id))[1]
+        pick <- function(col) if (is.na(hit) || is.null(prs[[col]])) NA_real_ else prs[[col]][hit]
+        gid_rival_block(
+          row, pts(), rival_ctx(), gid_pair_mismatch(gt, id, rv),
+          ev = list(scale = attr(map_conf(), "scale"),
+                    posterior = pick("posterior_same"), log10_lr = pick("log10_LR"),
+                    log10_lambda = pick("log10_lambda")),
+          post_cut = input$post_cut %||% NA_real_,
+          lambda_cut = input$lambda_cut %||% NA_real_,
+          kin_label = switch(input$kinship %||% "full_sib", half_sib = "half siblings",
+                             unrelated = "unrelated animals", "full siblings"))
+      }),
       tags$p(class = "gid-hint", style = "margin-top:.4rem",
              sprintf("Genotype: %d of %d loci called",
                      sum(!is.na(g)), length(g))),
@@ -1000,7 +1199,7 @@ gid_map_server <- function(input, output, session, deps) {
       tags$p(class = "gid-hint",
              sprintf("%d animals sampled more than once. %d seen once%s.",
                      length(multi), sum(d$n_samples == 1),
-                     if (isTRUE(input$map_grey)) ", shown grey" else "")),
+                     if (isTRUE(input$map_grey)) ", shown gray" else "")),
       if (length(shapes) > 1) tags$div(
         class = "gid-legend-row", style = "margin-bottom:.5rem;gap:.8rem",
         lapply(shapes, function(k) tags$span(
@@ -1024,7 +1223,7 @@ gid_map_server <- function(input, output, session, deps) {
   save_map <- function(fmt) {
     d <- tryCatch(shown(), error = function(e) NULL)
     if (is.null(d) || !nrow(d))
-      return(showNotification("Nothing to save yet - run the analysis first.",
+      return(showNotification("Nothing to save yet. Run the analysis first.",
                               type = "warning"))
     w <- input$map_fig_width %||% 9
     if (!is.finite(w) || w < 3) w <- 9
@@ -1049,7 +1248,7 @@ gid_map_server <- function(input, output, session, deps) {
         grDevices::png(f, width = w, height = h, units = "in", res = 300)
       } else {
         return(showNotification(
-          "This build of R has no raster graphics device. Use the PDF button - it is vector and scales to any size.",
+          "This build of R has no raster graphics device. Use the PDF button instead: it is a vector file and scales to any size.",
           type = "warning", duration = 10))
       }
       print(fig); grDevices::dev.off()
@@ -1091,12 +1290,12 @@ gid_map_server <- function(input, output, session, deps) {
   observeEvent(input$dl_map_html, {
     h <- tryCatch(map_html(), error = function(e) NULL)
     if (is.null(h))
-      return(showNotification("Nothing to share yet - run the analysis first.",
+      return(showNotification("Nothing to share yet. Run the analysis first.",
                               type = "warning"))
     deps$send_file(sprintf("genoID_map_%s.html", format(Sys.Date())), h,
                    type = "text/html;charset=utf-8")
     showNotification(paste("Saved an interactive map. Send that one file to",
-                           "anyone - it opens in any browser."),
+                           "anyone; it opens in any browser."),
                      type = "message", duration = 8)
   })
 

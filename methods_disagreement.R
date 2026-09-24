@@ -124,7 +124,7 @@ say("identically grouped by all 6 methods       : %d of %d (%.1f%%)",
     sum(stable_all), length(ids), 100 * mean(stable_all))
 say("identically grouped by the five core methods: %d of %d (%.1f%%)",
     sum(stable), length(ids), 100 * mean(stable))
-say("samples destabilised only by allelematch    : %d", sum(stable) - sum(stable_all))
+say("samples destabilized only by allelematch    : %d", sum(stable) - sum(stable_all))
 
 ## ------------------------------------------------ 4. majority-rule consensus --
 ## Take the pairs a majority of the five core methods agree on, then resolve the
@@ -162,7 +162,7 @@ say("spread excluding allelematch : %d - %d individuals (%d wide)",
 ## ------------------------------------------ 6. are the singletons for real? ---
 ## 48 wolves seen exactly once is a lot. The question is whether they are truly
 ## distinct animals or whether the cutoff is splitting resampled ones apart, and
-## the way to tell is to ask each singleton how close its nearest neighbour is.
+## the way to tell is to ask each singleton how close its nearest neighbor is.
 ## A singleton whose best rival sits at 1e-20 is not a borderline call.
 cf <- o$conf
 pr <- do.call(rbind, lapply(names(res_by <- o$res$by_group), function(g) res_by[[g]]$pairs))
@@ -183,9 +183,9 @@ brk <- c(-Inf, 1e-12, 1e-6, 0.001, 0.01, 0.1, 0.5, Inf)
 lbl <- c("below 1e-12 (decisive)", "1e-12 to 1e-6", "1e-6 to 0.001", "0.001 to 0.01",
          "0.01 to 0.1", "0.1 to 0.5", "above 0.5 (near-match)")
 print(table(`nearest-neighbour posterior` = cut(nn$posterior, brk, labels = lbl)))
-say("median nearest-neighbour posterior: %.3g   median log10 LR: %.1f",
+say("median nearest-neighbor posterior: %.3g   median log10 LR: %.1f",
     median(nn$posterior), median(nn$log10_LR))
-say("\nsingletons with a nearest neighbour worth a second look (posterior > 1e-6):")
+say("\nsingletons with a nearest neighbor worth a second look (posterior > 1e-6):")
 print(format(nn[nn$posterior > 1e-6, ], digits = 3), row.names = FALSE)
 write.csv(nn, file.path(OUT, "WOLF_singleton_nearest.csv"), row.names = FALSE)
 

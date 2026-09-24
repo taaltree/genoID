@@ -166,7 +166,8 @@ gid_project_server <- function(input, output, session, deps) {
           select        = updateSelectInput(session, id, selected = v),
           selectize     = updateSelectizeInput(session, id, selected = v),
           numeric       = updateNumericInput(session, id, value = v),
-          slider        = updateSliderInput(session, id, value = v),
+          slider        = if (id %in% names(GID_RATE_MAX)) gid_set_rate(session, id, v)
+                          else updateSliderInput(session, id, value = v),
           checkbox      = updateCheckboxInput(session, id, value = as.logical(v)),
           checkboxgroup = updateCheckboxGroupInput(session, id, selected = v),
           radio         = updateRadioButtons(session, id, selected = v))

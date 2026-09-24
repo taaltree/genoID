@@ -78,7 +78,7 @@ stopifnot(length(n_times) == n_ind)
 ## ---- where each animal lives ----------------------------------------------
 ## Prince of Wales Island, southeast Alaska: a real place at a realistic scale,
 ## so the basemap looks like somewhere. Samples scatter about 2 km around each
-## animal's activity centre, so home ranges are small next to the area sampled.
+## animal's activity center, so home ranges are small next to the area sampled.
 LAT0 <- 55.62; LON0 <- -132.90
 centre <- data.frame(lat = LAT0 + runif(n_ind, -0.16, 0.16),
                      lon = LON0 + runif(n_ind, -0.28, 0.28))

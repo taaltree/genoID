@@ -22,8 +22,8 @@ say  <- function(...) cat(sprintf(...), "\n")
 
 #' Simulate a population with home ranges, sample it, and genotype it badly.
 #'
-#' sigma_m is the home-range scale; spacing_m the distance between neighbouring
-#' activity centres. Their ratio is the quantity that matters: small sigma over
+#' sigma_m is the home-range scale; spacing_m the distance between neighboring
+#' activity centers. Their ratio is the quantity that matters: small sigma over
 #' large spacing means animals are spatially separable, and the reverse means
 #' every animal is everywhere and location says nothing.
 sim <- function(n_ind = 30, n_loci = 34, dropout = 0.03, false_allele = 0.015,

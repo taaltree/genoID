@@ -49,15 +49,15 @@ gid_read <- function(path, sheet = NULL) {
 }
 
 
-#' Normalise one genotype string.
+#' Normalize one genotype string.
 #'
 #' Upper-cases, splits on a separator if one is present, sorts the two alleles
-#' so that "TC" and "CT" are the same genotype, and maps every recognised
+#' so that "TC" and "CT" are the same genotype, and maps every recognized
 #' missing code to NA.
 #'
 #' @param strip_flags TRUE removes a quality flag and keeps the call, so "CT*"
 #'   becomes "C/T". FALSE treats a flagged call as missing, which is the point
-#'   of flagging it. Without a separator the second behaviour fell out of the
+#'   of flagging it. Without a separator the second behavior fell out of the
 #'   length check for free; with one, "C/T*" used to split into "C" and "T*" and
 #'   sail through as a genotype carrying an allele named "T*".
 gid_norm_gt <- function(x, sep = NULL, strip_flags = TRUE) {
@@ -116,7 +116,7 @@ gid_guess_sep <- function(df, exclude = NULL) {
 #' read count or a species-call column as a locus and quietly poison every
 #' downstream number, so a column has to look like a diploid genotype in
 #' several independent ways before it is accepted:
-#'   - every value parses to exactly two alleles (or a recognised missing code)
+#'   - every value parses to exactly two alleles (or a recognized missing code)
 #'   - all alleles are the same width
 #'   - the alphabet is DNA, or numeric fragment sizes when a separator is used
 #'   - between 2 and max_alleles distinct alleles, and few distinct genotypes
@@ -162,8 +162,13 @@ gid_detect_loci <- function(df, exclude = NULL, sep = NULL,
 
 #' Guess which column holds the sample identifier.
 #'
-#' Prefers a name that looks like an identifier, then uniqueness, and penalises
+#' Prefers a name that looks like an identifier, then uniqueness, and penalizes
 #' purely numeric columns -- read counts are unique per row but are not IDs.
+#'
+#' Among identifier-like columns, a complete one beats one with blank cells:
+#' rows without an ID are dropped from the analysis, so a field ID that was
+#' never filled in for some samples (a scat number, say) would silently lose
+#' them, while the lab's own sample ID covers every row.
 gid_guess_id_col <- function(df, exclude = NULL) {
   cand <- setdiff(names(df), exclude)
   if (!length(cand)) return(NULL)
@@ -172,8 +177,14 @@ gid_guess_id_col <- function(df, exclude = NULL) {
     s <- length(unique(v)) / max(1, length(v))
     suppressWarnings(num <- as.numeric(v[!is.na(v)]))
     if (length(num) && !anyNA(num)) s <- s - 1
-    if (grepl("sample|specimen|individual|indiv|barcode|(^|[^a-z])id$|^id",
-              cn, ignore.case = TRUE)) s <- s + 2
+    blank <- mean(gid_blank_ids(df, cn))
+    s <- s - blank
+    ## "Scat.ID", "sample_id", and camel case such as "LabID" or "SampleId";
+    ## but not the IDs of plates, wells or runs, which label reactions
+    id_like <- (grepl("sample|specimen|individual|indiv|barcode|(^|[^a-z])id$|^id",
+                      cn, ignore.case = TRUE) || grepl("[a-z](ID|Id)$", cn)) &&
+               !grepl("plate|well|batch|run|lane|pool|locus|marker", cn, ignore.case = TRUE)
+    if (id_like) s <- s + 2 + (blank == 0)
     s
   }, 0)
   cand[which.max(score)]
@@ -193,7 +204,7 @@ gid_blank_ids <- function(df, id_col) {
   is.na(v) | !nzchar(trimws(v)) | trimws(v) %in% c("NA", "#N/A")
 }
 
-#' Build the normalised sample x locus genotype matrix.
+#' Build the normalized sample x locus genotype matrix.
 gid_matrix <- function(df, id_col, loci, sep = NULL, strip_flags = TRUE) {
   bad <- gid_blank_ids(df, id_col)
   if (any(bad)) df <- df[!bad, , drop = FALSE]
@@ -378,7 +389,7 @@ gid_error_rates <- function(rep_gt, ref_gt, sample_id_rep, sample_id_ref) {
 #'
 #'   L = prod_{sample,locus} sum_g P(g) prod_k P(obs_k | g, d, f)
 #'
-#' and maximises over the two rates. Requires >= 2 replicates per sample.
+#' and maximizes over the two rates. Requires >= 2 replicates per sample.
 #' A reproducible subsample that leaves the caller's RNG stream untouched.
 #' (Named for what it does; nothing to do with the withr package.)
 gid_subsample <- function(x, n, seed = 1L) {
@@ -983,7 +994,7 @@ gid_threshold_sweep <- function(gt, enc = NULL, max_k = 6, min_loci = 20,
 # =============================================================================
 
 #' allelematch scores dissimilarity as mismatching loci / co-typed loci and
-#' picks the threshold that minimises samples it cannot confidently classify.
+#' picks the threshold that minimizes samples it cannot confidently classify.
 #' Its real contribution is the "unclassified" category: samples that are
 #' ambiguous get flagged rather than forced into a cluster.
 #'
@@ -1084,7 +1095,7 @@ gid_method_allelematch <- function(gt, alleleMismatch = NULL, cutHeight = NULL,
 
 
 #' Built-in equivalent: dissimilarity = mismatching loci, threshold chosen by
-#' minimising the number of samples that fall in the ambiguous zone.
+#' minimizing the number of samples that fall in the ambiguous zone.
 gid_method_allelematch_fallback <- function(gt, alleleMismatch = NULL, min_loci = 20) {
   enc <- gid_encode(gt); p <- gid_pairwise(enc, gt)
   p <- p[p$n_compared >= min_loci, , drop = FALSE]
@@ -1820,7 +1831,7 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
   ## ---- 3. replicates on the table but not on the plate -------------------
   if (isTRUE(has_reps) && !isTRUE(using_reps))
     add("use_reps", "high",
-        "Analyse the PCR replicates directly",
+        "Analyze the PCR replicates directly",
         paste("Your file holds several reactions per sample, but the analysis is",
               "running on one collapsed genotype each. Conditioning on every",
               "reaction keeps the information a consensus throws away -- most",
@@ -1884,7 +1895,7 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
       add("sethi_gap", "low",
           sprintf("Sethi returns %d individuals, the likelihood ratio %d", n_se, n_lr),
           paste("The two use the same likelihood and differ only in the decision",
-                "rule. Sethi accepts any pair whose evidence merely favours a",
+                "rule. Sethi accepts any pair whose evidence merely favors a",
                 "match; the likelihood ratio requires a stated posterior. Raising",
                 "lambda is the way to make Sethi as cautious as the cutoff makes",
                 "the likelihood ratio."),
@@ -1941,7 +1952,7 @@ gid_explain_disagreement <- function(lr, sethi, post_cut = 0.999,
     d$sethi_match & !d$lr_match,
     ifelse(gap > 0.5,
            "Sethi's alternative is stronger: some relationship explains this pair better than the one you nominated",
-           "Decision rule: evidence favours a match but not enough to clear your posterior cutoff"),
+           "Decision rule: evidence favors a match but not enough to clear your posterior cutoff"),
     ifelse(gap < -0.5,
            "Your nominated alternative is weaker than Sethi's best, so the likelihood ratio is more generous here",
            "Decision rule: clears your posterior cutoff but the evidence is not decisive on its own"))
@@ -2017,7 +2028,7 @@ gid_pbinom_upper <- function(probs, k) {
 #'   lowers heterozygosity and raises missingness, so a poorly typed sample has
 #'   a noisy Ho that clears a fixed excess threshold by chance: on a demo
 #'   containing no mixtures at all, every false positive was a sample with 21
-#'   of 42 loci. Eriksson et al. required 24 of 31 loci (77%) before analysing
+#'   of 42 loci. Eriksson et al. required 24 of 31 loci (77%) before analyzing
 #'   anything, and that bar is doing real work -- on one real dataset the
 #'   apparent mixture rate fell from 11.6% to 3.6% once it was applied.
 #' @return one row per sample: n_loci, Ho, He, excess, p, q, missing, and flag,
@@ -2117,6 +2128,8 @@ gid_sample_confidence <- function(result, gt = NULL, pid_tab = NULL,
       if (is.null(d)) return(NULL)
       sc <<- attr(d, "scale")
       d$individual <- paste0(g, "_", d$individual)
+      d$rival_individual <- ifelse(is.na(d$rival_individual), NA_character_,
+                                   paste0(g, "_", d$rival_individual))
       cbind(group = g, d)
     })
     out <- out[!vapply(out, is.null, TRUE)]
@@ -2218,6 +2231,71 @@ gid_sample_confidence <- function(result, gt = NULL, pid_tab = NULL,
 }
 
 
+#' Per-sample confidence for one method of a run.
+#'
+#' A method that clusters internally exposes no per-pair score, so it borrows
+#' the locus-mismatch counts from the exact-match run, which describe the data
+#' rather than any one method.
+#'
+#' @param r a full run: list(methods, gt, ...)
+#' @param key which method, e.g. "probabilistic"
+gid_method_confidence <- function(r, key, pid_tab = NULL, post_cut = 0.999,
+                                  min_loci = 15) {
+  b <- r$methods[[key]]
+  if (is.null(b)) return(NULL)
+  if (is.null(b$pairs) ||
+      (!is.null(b$by_group) &&
+       all(vapply(b$by_group, function(e) is.null(e$pairs), TRUE)))) {
+    src <- r$methods$exact
+    b <- if (!is.null(b$by_group)) {
+      b$by_group <- Map(function(e, s) { e$pairs <- s$pairs; e },
+                        b$by_group, src$by_group[names(b$by_group)]); b
+    } else { b$pairs <- src$pairs; b }
+  }
+  gid_sample_confidence(b, gt = r$gt, pid_tab = pid_tab,
+                        post_cut = post_cut, min_loci = min_loci)
+}
+
+
+#' How different two genotypes are, for chosen pairs of samples.
+#'
+#' The same counts gid_pairwise() makes for every pair, for just the pairs
+#' asked about, so one comparison stays cheap in a large run.
+#'
+#' @param gt genotype matrix, sample ids as row names, genotypes as "lo/hi"
+#' @param id1,id2 equal-length vectors of sample ids
+#' @return data.frame(id1, id2, n_compared, n_mismatch, n_mismatch_2allele,
+#'   prop_mismatch): loci typed in both, loci where the genotypes differ at
+#'   all, loci sharing no allele, and the share of compared loci that differ
+gid_pair_mismatch <- function(gt, id1, id2) {
+  id1 <- as.character(id1); id2 <- as.character(id2)
+  stopifnot(length(id1) == length(id2))
+  n <- length(id1)
+  out <- data.frame(id1 = id1, id2 = id2, n_compared = rep(NA_integer_, n),
+                    n_mismatch = NA_integer_, n_mismatch_2allele = NA_integer_,
+                    prop_mismatch = NA_real_, stringsAsFactors = FALSE)
+  i <- match(id1, rownames(gt)); j <- match(id2, rownames(gt))
+  ok <- !is.na(i) & !is.na(j)
+  if (!any(ok)) return(out)
+  ## split each genotype into its two alleles once, then index the pairs
+  al1 <- gt; al1[] <- sub("/.*$", "", gt)
+  al2 <- gt; al2[] <- sub("^.*/", "", gt)
+  i <- i[ok]; j <- j[ok]
+  both <- !is.na(gt[i, , drop = FALSE]) & !is.na(gt[j, , drop = FALSE])
+  diff <- both & gt[i, , drop = FALSE] != gt[j, , drop = FALSE]
+  a1 <- al1[i, , drop = FALSE]; a2 <- al2[i, , drop = FALSE]
+  b1 <- al1[j, , drop = FALSE]; b2 <- al2[j, , drop = FALSE]
+  share <- a1 == b1 | a1 == b2 | a2 == b1 | a2 == b2
+  hard <- diff & !share
+  out$n_compared[ok] <- as.integer(rowSums(both))
+  out$n_mismatch[ok] <- as.integer(rowSums(diff))
+  out$n_mismatch_2allele[ok] <- as.integer(rowSums(hard))
+  out$prop_mismatch <- ifelse(out$n_compared > 0,
+                              out$n_mismatch / out$n_compared, NA_real_)
+  out
+}
+
+
 #' Per-sample power: how identifiable is this sample given only the loci it
 #' actually has? This is the honest answer to "can I trust a singleton?"
 gid_sample_power <- function(gt, pid_tab) {
@@ -2236,8 +2314,8 @@ gid_sample_power <- function(gt, pid_tab) {
 # =============================================================================
 #
 # Augustine et al. (2020, PNAS 117:17903) showed that where a sample was found
-# carries real information about who left it: two scats a few hundred metres
-# apart are far more likely to be one animal than two scats twenty kilometres
+# carries real information about who left it: two scats a few hundred meters
+# apart are far more likely to be one animal than two scats twenty kilometers
 # apart, because animals have home ranges. Their genotype spatial partial
 # identity model (gSPIM) folds this into a full spatial capture-recapture model
 # and resolves identity, genotyping error and density together by MCMC.
@@ -2255,12 +2333,12 @@ gid_sample_power <- function(gt, pid_tab) {
 # where d is the distance between the two samples.
 #
 #   f_same  two draws from one animal's home range. If locations are bivariate
-#           normal about an activity centre with scale sigma, their separation
+#           normal about an activity center with scale sigma, their separation
 #           is bivariate normal with scale sigma*sqrt(2), so the distance is
 #           Rayleigh:  f_same(d) = d/(2 sigma^2) exp(-d^2 / (4 sigma^2)).
 #
 #   f_diff  the distance between samples from two DIFFERENT animals. This one is
-#           not modelled: it is read off the data, from the pairs the genetics
+#           not modeled: it is read off the data, from the pairs the genetics
 #           has already ruled out. That matters, because for opportunistic
 #           collection the sampling footprint is irregular and any parametric
 #           guess at it would be wrong in a way that biases every pair.
@@ -2270,7 +2348,7 @@ gid_sample_power <- function(gt, pid_tab) {
 # tails and applied only to the uncertain middle -- empirical Bayes, and it
 # should be described that way rather than as a fully Bayesian treatment.
 
-#' Great-circle-ish distance in metres between two lon/lat points.
+#' Great-circle-ish distance in meters between two lon/lat points.
 #'
 #' Equirectangular approximation. Within a study area it agrees with the proper
 #' haversine to a fraction of a percent, and it is vectorised and cheap.
@@ -2285,7 +2363,7 @@ gid_dist_m <- function(lon1, lat1, lon2, lat2) {
 #'
 #' @param pairs   the $pairs frame, needing id1, id2, log10_LR, posterior_same
 #' @param coords  data.frame(sample, lon, lat)
-#' @param sigma   home-range scale in metres; NULL estimates it from the data
+#' @param sigma   home-range scale in meters; NULL estimates it from the data
 #' @param post_cut what counts as a confident genetic match when calibrating
 #' @return pairs with dist_m, log10_LR_space, log10_LR_joint, posterior_joint,
 #'   plus attr "spatial" holding sigma, the sample sizes and whether it ran
