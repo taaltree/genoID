@@ -21,11 +21,11 @@ GID_SAVED_INPUTS <- list(
   selectize = c("group_col", "rep_drop", "use_loci",
                 "map_link_who", "map_show_who", "map_show_year"),
   numeric = c("lambda_cut", "map_fig_width", "map_utm_zone", "max_mismatch",
-              "min_loci", "min_locus_call", "min_sample_call", "near_match",
-              "prior"),
+              "min_loci", "min_locus_call", "min_sample_call", "mix_cut",
+              "near_match", "prior"),
   slider = c("dropout", "false_allele", "post_cut"),
   checkbox = c("map_fig_labels", "map_grey", "map_utm_south",
-               "run_genalex", "run_sethi"),
+               "run_genalex", "drop_flagged", "drop_mixtures", "use_spatial"),
   checkboxgroup = c("map_show_sex", "sethi_rel"),
   radio = c("linkage", "map_link_style", "rep_mode"))
 

@@ -639,57 +639,63 @@ gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
 
 #' Propagate per-replicate error into the residual error of a consensus rule.
 #'
-#' The consensus genotypes the lab actually analyses have already survived a
+#' The consensus genotypes the lab actually analyzes have already survived a
 #' multi-tube rule, so their error rate is far below the per-replicate rate.
-#' Monte-Carlo the rule to get the residual rates that the LR model should use.
+#' This works out the residual rates the consensus route should use. It is
+#' exact rather than simulated: with two alleles a reaction can only return
+#' nothing, the heterozygote, or one of the two homozygotes, so every outcome
+#' of n_rep reactions can be listed and weighted. The simulation it replaces
+#' took seconds and could not resolve a rate much below one in 20,000.
+#'
+#' The residual rates are among the calls the rule actually makes. A locus the
+#' rule refuses to call is missing and never reaches the likelihood, so it
+#' belongs in neither the numerator nor the denominator.
 #'
 #' @param rule "taberlet" (het accepted on het_n reps, hom needs hom_n reps),
 #'   "majority", or "unanimous".
+#' @param nsim,seed unused; kept so scripts written for the simulated version
+#'   still run.
 gid_propagate_error <- function(dropout, false_allele, n_rep = 3,
                                 rule = c("taberlet", "majority", "unanimous"),
                                 hom_n = 3, het_n = 2, per_rep_missing = 0.2,
-                                nsim = 20000, seed = 1) {
+                                nsim = NULL, seed = NULL) {
   rule <- match.arg(rule)
-  set.seed(seed)
-  simulate_one <- function(true_het) {
-    obs <- character(n_rep)
-    for (k in seq_len(n_rep)) {
-      if (runif(1) < per_rep_missing) { obs[k] <- "00"; next }
-      if (true_het) {
-        obs[k] <- if (runif(1) < dropout) sample(c("A/A", "B/B"), 1) else "A/B"
-      } else {
-        obs[k] <- if (runif(1) < false_allele) "A/B" else "A/A"
-      }
-    }
-    obs
+  n_rep <- max(1L, as.integer(round(n_rep)))
+  ## every way n_rep reactions can split into missing, het, hom A and hom B
+  k <- expand.grid(m = 0:n_rep, h = 0:n_rep, a = 0:n_rep)
+  k <- k[k$m + k$h + k$a <= n_rep, ]
+  k$b <- n_rep - k$m - k$h - k$a
+  call <- rep(NA_character_, nrow(k))
+  if (rule == "taberlet") {
+    het <- k$h >= het_n | (k$h + k$a >= het_n & k$h + k$b >= het_n)
+    call[!het & k$a >= hom_n & k$a >= k$b] <- "hom"
+    call[!het & k$b >= hom_n & k$b > k$a]  <- "hom"
+    call[het] <- "het"
+  } else if (rule == "majority") {
+    cnt <- cbind(a = k$a, h = k$h, b = k$b)       # table() order: A/A, A/B, B/B
+    top <- apply(cnt, 1, max)
+    second <- apply(cnt, 1, function(z) sort(z, decreasing = TRUE)[2])
+    ok <- top >= 2 & !(second == top & second > 0)
+    win <- colnames(cnt)[max.col(cnt, ties.method = "first")]
+    call[ok] <- ifelse(win[ok] == "h", "het", "hom")
+  } else {
+    call[k$m == 0 & k$h == n_rep] <- "het"
+    call[k$m == 0 & (k$a == n_rep | k$b == n_rep)] <- "hom"
   }
-  call_consensus <- function(obs) {
-    nz <- obs[obs != "00"]
-    if (!length(nz)) return(NA_character_)
-    tb <- table(nz)
-    hets <- tb[names(tb) == "A/B"]
-    homs <- tb[names(tb) != "A/B"]
-    if (rule == "unanimous")
-      return(if (length(nz) == n_rep && length(unique(nz)) == 1) nz[1] else NA_character_)
-    if (rule == "majority") {
-      if (length(tb) > 1 && sort(tb, decreasing = TRUE)[1] == sort(tb, decreasing = TRUE)[2])
-        return(NA_character_)
-      return(if (max(tb) >= 2) names(which.max(tb)) else NA_character_)
-    }
-    # taberlet
-    if (length(hets) && hets[1] >= het_n) return("A/B")
-    al <- table(unlist(strsplit(unique(nz), "/", fixed = TRUE)))
-    al <- table(unlist(lapply(nz, function(z) unique(strsplit(z, "/")[[1]]))))
-    if (sum(al >= het_n) == 2) return("A/B")
-    if (length(homs) && max(homs) >= hom_n) return(names(homs)[which.max(homs)])
-    NA_character_
+  coef <- factorial(n_rep) / (factorial(k$m) * factorial(k$h) *
+                              factorial(k$a) * factorial(k$b))
+  prob <- function(pm, ph, pa, pb) coef * pm^k$m * ph^k$h * pa^k$a * pb^k$b
+  m <- per_rep_missing
+  p_het <- prob(m, (1 - m) * (1 - dropout), (1 - m) * dropout / 2, (1 - m) * dropout / 2)
+  p_hom <- prob(m, (1 - m) * false_allele, (1 - m) * (1 - false_allele), 0)
+  among_calls <- function(p, what) {
+    made <- sum(p[!is.na(call)])
+    if (made > 0) sum(p[call %in% what]) / made else NA_real_
   }
-  het_res <- replicate(nsim, call_consensus(simulate_one(TRUE)))
-  hom_res <- replicate(nsim, call_consensus(simulate_one(FALSE)))
-  c(dropout      = mean(het_res %in% c("A/A", "B/B"), na.rm = TRUE),
-    false_allele = mean(hom_res == "A/B", na.rm = TRUE),
-    missing_het  = mean(is.na(het_res)),
-    missing_hom  = mean(is.na(hom_res)))
+  c(dropout      = among_calls(p_het, "hom"),
+    false_allele = among_calls(p_hom, "het"),
+    missing_het  = sum(p_het[is.na(call)]),
+    missing_hom  = sum(p_hom[is.na(call)]))
 }
 
 
@@ -1394,8 +1400,10 @@ gid_lr_table <- function(p, dict, dropout, false_allele, k) {
 #'   PCR replicates, so one sample contributes several rows).
 #' @param rep_sample the sample each row belongs to.
 #' @param samples the sample order to return, defaulting to first appearance.
+#' @param sample_scale optional per-sample error multipliers, named by sample
+#'   (see gid_sample_error). Both rates are multiplied, then capped.
 gid_geno_lik <- function(rep_gt, rep_sample, freqs, dropout, false_allele,
-                         samples = NULL, dict = NULL) {
+                         samples = NULL, dict = NULL, sample_scale = NULL) {
   loci <- colnames(rep_gt)
   rep_sample <- as.character(rep_sample)
   if (is.null(samples)) samples <- unique(rep_sample)
@@ -1409,6 +1417,8 @@ gid_geno_lik <- function(rep_gt, rep_sample, freqs, dropout, false_allele,
   if (is.null(dict))
     dict <- lapply(loci, function(L) sort(unique(rep_gt[, L][!is.na(rep_gt[, L])])))
   names(dict) <- loci
+  k <- if (is.null(sample_scale)) NULL else {
+    v <- unname(sample_scale[samples]); v[is.na(v)] <- 1; v }
 
   lik <- vector("list", length(loci)); names(lik) <- loci
   observed <- matrix(FALSE, n, length(loci), dimnames = list(samples, loci))
@@ -1416,22 +1426,175 @@ gid_geno_lik <- function(rep_gt, rep_sample, freqs, dropout, false_allele,
   for (L in loci) {
     dd <- dict[[L]]; G <- length(dd)
     if (!G) { lik[[L]] <- matrix(1, n, 1); next }
-    E <- gid_obs_matrix(dd, freqs[[L]], d[[L]], f[[L]])   # E[obs, true]
     m <- matrix(1, n, G, dimnames = list(samples, dd))
     o <- match(rep_gt[, L], dd)
-    got <- !is.na(o)
-    if (any(got)) {
-      # multiply each sample's row by P(observation | g) for every replicate
-      for (r in which(got)) {
-        s <- idx[r]
-        m[s, ] <- m[s, ] * E[o[r], ]
-        observed[s, L] <- TRUE
+    got <- which(!is.na(o))
+    if (length(got)) {
+      ## Every reaction multiplies its sample's row by P(observation | g).
+      ## Done as a sum of logs grouped by sample, so the cost is one pass over
+      ## the reactions rather than an R loop over them.
+      kr <- if (is.null(k)) rep(1, length(got)) else k[idx[got]]
+      lp <- matrix(0, length(got), G)
+      for (kv in unique(kr)) {
+        w <- kr == kv
+        E <- gid_obs_matrix(dd, freqs[[L]], gid_scaled_rate(d[[L]], kv, "dropout"),
+                            gid_scaled_rate(f[[L]], kv, "false_allele"))   # E[obs, true]
+        lp[w, ] <- log(E[o[got][w], , drop = FALSE])
       }
+      s <- rowsum(lp, idx[got])
+      rows <- as.integer(rownames(s))
+      m[rows, ] <- exp(s)
+      observed[rows, L] <- TRUE
     }
     lik[[L]] <- m
   }
   list(samples = samples, loci = loci, dict = dict, lik = lik,
-       observed = observed, n_reps = as.integer(table(factor(idx, levels = seq_len(n)))))
+       observed = observed, n_reps = as.integer(table(factor(idx, levels = seq_len(n)))),
+       sample_scale = if (is.null(k)) NULL else setNames(k, samples))
+}
+
+
+## A rate multiplied by a sample's error scale, capped where the model stops
+## meaning anything: past these, a reaction says almost nothing about the
+## genotype, which is the right reading of a sample that bad.
+GID_RATE_CAP <- c(dropout = 0.6, false_allele = 0.5)
+gid_scaled_rate <- function(rate, scale, which) min(GID_RATE_CAP[[which]], rate * scale)
+
+
+#' How much more often each sample's reactions err than the typical sample's.
+#'
+#' One pair of error rates for a whole dataset describes the typical sample,
+#' and scats are not typical: a minority -- old, wet, sun-baked -- err many
+#' times as often as the rest. A model told to expect the typical rate reads
+#' those samples' disagreements with themselves as differences between animals,
+#' and splits their recaptures off as new individuals. In simulations where 15%
+#' of samples dropped alleles at 45% and the rest at 2%, one shared rate left
+#' the likelihood ratio missing 7.6% of recapture pairs; these scales missed
+#' none (compare_sample_quality.R).
+#'
+#' Each sample gets one multiplier, applied to both the dropout and the false-
+#' allele rate, chosen on a grid as the one that best explains its own
+#' reactions. Both rates, because noisy samples are not noisy in one way only:
+#' when the excess error is mostly false alleles, raising dropout alone left
+#' the likelihood ratio missing more recaptures than one shared rate did, while
+#' one multiplier on both did best in every scenario tested.
+#'
+#' Only loci where the sample has two or more reactions count, so the answer
+#' comes from how often its replicates disagree rather than from how
+#' homozygous its animal happens to be. The grid starts at 1: a sample can be
+#' noisier than typical but never cleaner, since a handful of replicated loci
+#' is too little evidence to earn a sharper likelihood. And a sample stays at 1
+#' unless its own reactions reject it, so one unlucky flip does not single it
+#' out.
+#'
+#' @param dropout,false_allele the pooled per-reaction rates (gid_estimate_error).
+#' @param min_gain log-likelihood a sample's own scale must gain over 1 before
+#'   it is used; 1.92 is a likelihood-ratio test at the 5% level.
+#' @return error multipliers named by sample, 1 for a typical sample.
+gid_sample_error <- function(rep_gt, rep_sample, freqs, dropout, false_allele,
+                             samples = NULL, dict = NULL,
+                             scales = c(1, 1.5, 2, 3, 5, 8, 12, 20, 30),
+                             min_gain = 1.92) {
+  loci <- colnames(rep_gt)
+  rep_sample <- as.character(rep_sample)
+  if (is.null(samples)) samples <- unique(rep_sample)
+  idx <- match(rep_sample, samples)
+  keep <- !is.na(idx)
+  rep_gt <- rep_gt[keep, , drop = FALSE]; idx <- idx[keep]
+  n <- length(samples)
+  scales <- sort(unique(c(1, scales[scales > 1])))
+  d <- if (length(dropout) == 1) setNames(rep(dropout, length(loci)), loci) else dropout
+  f <- if (length(false_allele) == 1) setNames(rep(false_allele, length(loci)), loci) else false_allele
+  if (is.null(dict))
+    dict <- lapply(loci, function(L) sort(unique(rep_gt[, L][!is.na(rep_gt[, L])])))
+  names(dict) <- loci
+
+  ll <- matrix(0, n, length(scales))
+  for (L in loci) {
+    dd <- dict[[L]]
+    if (length(dd) < 2 || is.null(freqs[[L]])) next
+    o <- match(rep_gt[, L], dd)
+    got <- which(!is.na(o))
+    if (!length(got)) next
+    multi <- tabulate(idx[got], n) >= 2
+    sel <- got[multi[idx[got]]]
+    if (!length(sel)) next
+    gp <- gid_geno_prob(freqs[[L]], dd)
+    for (j in seq_along(scales)) {
+      E <- gid_obs_matrix(dd, freqs[[L]], gid_scaled_rate(d[[L]], scales[j], "dropout"),
+                          gid_scaled_rate(f[[L]], scales[j], "false_allele"))
+      s <- rowsum(log(E[o[sel], , drop = FALSE]), idx[sel])
+      rows <- as.integer(rownames(s))
+      top <- apply(s, 1, max)                        # log-sum-exp, kept stable
+      ll[rows, j] <- ll[rows, j] + top + log(exp(s - top) %*% gp)
+    }
+  }
+  best <- max.col(ll, ties.method = "first")
+  best[ll[cbind(seq_len(n), best)] - ll[, 1] < min_gain] <- 1L
+  setNames(scales[best], samples)
+}
+
+
+#' What the methods' sample_error argument means: TRUE measures every
+#' sample's own error scale, a named vector supplies the scales, and FALSE or
+#' NULL holds every sample to the one pair of rates.
+gid_sample_error_arg <- function(x, rep_gt, rep_sample, freqs, dropout,
+                                 false_allele, samples, dict) {
+  if (is.null(x) || isFALSE(x)) return(NULL)
+  if (isTRUE(x))
+    return(gid_sample_error(rep_gt, rep_sample, freqs, dropout, false_allele,
+                            samples = samples, dict = dict))
+  v <- unname(x[samples]); v[is.na(v)] <- 1
+  setNames(v, samples)
+}
+
+
+#' How often each sample's replicates disagree with one another.
+#'
+#' Model-free and instant: the share of loci typed in two or more reactions
+#' whose calls are not all identical. It is what separates a dataset where one
+#' error rate fits every sample from one where a minority is far noisier than
+#' the rest, and it needs no error model to compute.
+gid_replicate_discordance <- function(rep_gt, rep_sample) {
+  rep_sample <- as.character(rep_sample)
+  s <- unique(rep_sample); idx <- match(rep_sample, s); n <- length(s)
+  n_multi <- n_disc <- integer(n)
+  for (L in colnames(rep_gt)) {
+    v <- rep_gt[, L]; ok <- which(!is.na(v))
+    if (!length(ok)) next
+    nobs <- tabulate(idx[ok], n)
+    u <- !duplicated(paste(idx[ok], v[ok]))
+    ndist <- tabulate(idx[ok][u], n)
+    n_multi <- n_multi + (nobs >= 2)
+    n_disc  <- n_disc + (nobs >= 2 & ndist > 1)
+  }
+  data.frame(sample = s, n_reactions = tabulate(idx, n),
+             loci_replicated = n_multi, loci_discordant = n_disc,
+             discordance = ifelse(n_multi > 0, n_disc / n_multi, NA_real_),
+             stringsAsFactors = FALSE)
+}
+
+
+#' Is one error rate enough for this dataset?
+#'
+#' Flags a dataset where a minority of samples disagrees with itself several
+#' times as often as the typical sample. That is the case a single shared error
+#' rate handles worst, and the reason the replicate route measures a rate for
+#' every sample.
+#'
+#' @param disc output of gid_replicate_discordance().
+#' @param min_loci samples with fewer replicated loci than this are not judged.
+gid_quality_spread <- function(disc, min_loci = 5) {
+  ok <- !is.na(disc$discordance) & disc$loci_replicated >= min_loci
+  x <- disc$discordance[ok]
+  if (length(x) < 10) return(NULL)
+  typical <- stats::median(x)
+  cut <- max(3 * typical, typical + 0.10)
+  noisy <- x > cut
+  list(n = length(x), typical = typical, cut = cut,
+       n_noisy = sum(noisy), share_noisy = mean(noisy),
+       noisy = disc$sample[ok][noisy],
+       uneven = sum(noisy) >= 3 && mean(noisy) >= 0.05)
 }
 
 
@@ -1470,11 +1633,18 @@ gid_pair_loglik <- function(glik, freqs, hypotheses = c("same_individual", "full
 }
 
 
+#' @param reps optional list(gt = reaction x locus matrix, sample = ids) of PCR
+#'   replicates. The likelihood then conditions on every reaction (section 9a),
+#'   and dropout and false_allele must be per-reaction rates.
+#' @param sample_error replicate route only: TRUE lets each sample's reactions
+#'   err as often as they actually do (gid_sample_error), a named vector of
+#'   multipliers supplies the scales, FALSE holds every sample to one rate.
 gid_method_lr <- function(gt, freqs = NULL, enc = NULL,
                           dropout = 0.02, false_allele = 0.005,
                           kinship = "full_sib", prior_same = NULL,
                           post_cut = 0.999, min_loci = 15,
-                          linkage = "single", weights = NULL, reps = NULL) {
+                          linkage = "single", weights = NULL, reps = NULL,
+                          sample_error = TRUE) {
 
   ## ---- replicate route: condition on every PCR observation ---------------
   if (!is.null(reps)) {
@@ -1491,9 +1661,12 @@ gid_method_lr <- function(gt, freqs = NULL, enc = NULL,
       rgt <- rbind(rgt, gt[orphan, , drop = FALSE])
       rsm <- c(rsm, orphan)
     }
+    dict <- gid_encode(gt)$dict
+    sse  <- gid_sample_error_arg(sample_error, rgt, rsm, freqs, dropout,
+                                 false_allele, rownames(gt), dict)
     glik <- gid_geno_lik(rgt, rsm, freqs, dropout, false_allele,
-                         samples = rownames(gt),
-                         dict = gid_encode(gt)$dict)
+                         samples = rownames(gt), dict = dict,
+                         sample_scale = sse)
     pl <- gid_pair_loglik(glik, freqs, c("same_individual", kin))
     return(gid_lr_finish(rownames(gt),
                          pl[["same_individual"]] - pl[[kin]], pl$n_compared,
@@ -1503,8 +1676,10 @@ gid_method_lr <- function(gt, freqs = NULL, enc = NULL,
                                          kinship = kinship, post_cut = post_cut,
                                          min_loci = min_loci, linkage = linkage,
                                          input = "replicates",
+                                         sample_error = !is.null(sse),
                                          reps_per_sample = mean(glik$n_reps),
-                                         n_from_consensus = length(orphan))))
+                                         n_from_consensus = length(orphan)),
+                         extra = list(sample_error = sse)))
   }
 
   if (is.null(enc))   enc   <- gid_encode(gt)
@@ -1787,9 +1962,16 @@ gid_recommend_cutoff <- function(tab, budget = 1, max_post = NULL) {
 #' @param err_measured optional list(dropout, false_allele) from replicates
 #' @param calib optional table from gid_calibrate_threshold() for the main group
 #' @param pid optional P(ID) table, for the kinship argument
+#' @param shown the method the user is looking at; checks about its clusters
+#'   and about the posterior cutoff are made against that method.
+#' @param err_measured measured rates on the same scale as the rates in force:
+#'   per reaction for the replicate route, residual for the consensus route.
+#' @param routes gid_compare_routes() output for the shown method, if both
+#'   routes were run.
 #' @return data.frame of suggestions, most urgent first
 gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
-                       pid = NULL, has_reps = FALSE, using_reps = FALSE) {
+                       pid = NULL, has_reps = FALSE,
+                       shown = "probabilistic", routes = NULL) {
   out <- list()
   add <- function(id, severity, title, why, evidence = NA_character_,
                   param = NA_character_, value = NA_real_, label = NA_character_)
@@ -1800,10 +1982,13 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
 
   lr    <- res$methods$probabilistic
   sethi <- res$methods$sethi
+  cur   <- res$methods[[shown]] %||% lr
   n_lr  <- if (!is.null(lr)) length(unique(lr$assignment$individual)) else NA_integer_
 
   ## ---- 1. is the cutoff reachable at all? --------------------------------
-  if (!is.null(calib)) {
+  ## The posterior cutoff belongs to the likelihood ratio alone, so advice
+  ## about it only makes sense while that is the method on screen.
+  if (!is.null(calib) && identical(shown, "probabilistic")) {
     mx  <- attr(calib, "max_posterior") %||% calib$max_post[1]
     rec <- gid_recommend_cutoff(calib, budget = settings$budget %||% 1,
                                 max_post = mx)
@@ -1852,21 +2037,25 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
         "Measure your error rates from the replicates",
         paste("Your file has several reactions per sample, which is exactly what",
               "is needed to measure dropout and false alleles directly. Until you",
-              "do, the analysis is running on default rates that came from nobody's",
-              "data."),
-        "Press \"Estimate from replicates\" in the sidebar.",
+              "do, the analysis is running on rates set by hand rather than",
+              "measured from these reactions."),
+        "Press \"Estimate these from my data\" in the sidebar.",
         NA_character_, NA_real_, NA_character_)
 
-  ## ---- 3. replicates on the table but not on the plate -------------------
-  if (isTRUE(has_reps) && !isTRUE(using_reps))
-    add("use_reps", "high",
-        "Analyze the PCR replicates directly",
-        paste("Your file holds several reactions per sample, but the analysis is",
-              "running on one collapsed genotype each. Conditioning on every",
-              "reaction keeps the information a consensus throws away -- most",
-              "importantly, which calls were shaky."),
-        "The file has more than one row per sample.",
-        "rep_mode", NA_real_, "Use replicates")
+  ## ---- 3. the replicate and consensus routes disagreeing -----------------
+  ## Both routes run whenever replicates exist, so the useful advice is not
+  ## which to pick but which samples the choice decides.
+  if (!is.null(routes) && routes$n_moved > 0)
+    add("routes", "medium",
+        sprintf("%d sample%s placed differently by the replicate and consensus routes",
+                routes$n_moved, if (routes$n_moved == 1) " is" else "s are"),
+        paste("The routes assume different things about error: that a sample's",
+              "reactions err independently at that sample's own rate, or that",
+              "every consensus call is equally reliable. Where they disagree, one",
+              "assumption is failing for those samples, so they are the ones to",
+              "check by hand before you report a count."),
+        sprintf("Using every replicate: %d individuals. Consensus first: %d. The samples are listed on the Method comparison tab.",
+                routes$n_individuals[["replicates"]], routes$n_individuals[["consensus"]]))
 
   ## ---- 4. an unrelated null in a population with relatives ---------------
   if (identical(settings$kinship, "unrelated")) {
@@ -1885,7 +2074,7 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
   }
 
   ## ---- 5. clusters held together by a chain ------------------------------
-  nc <- if (!is.null(lr)) lr$n_conflict %||% 0L else 0L
+  nc <- if (!is.null(cur)) cur$n_conflict %||% 0L else 0L
   if (nc > 0 && identical(settings$linkage, "single"))
     add("linkage", "medium",
         sprintf("%d cluster%s not internally consistent", nc, if (nc == 1) " is" else "s are"),
@@ -1893,14 +2082,14 @@ gid_advise <- function(res, settings, err_measured = NULL, calib = NULL,
               "the same animal even when they do not match each other. Complete",
               "linkage requires every pair inside a cluster to match, which is",
               "the stricter and usually the safer reading."),
-        sprintf("%d cluster%s contain a pair that failed to match.",
-                nc, if (nc == 1) "" else "s"),
+        sprintf("%d cluster%s a pair that failed to match.",
+                nc, if (nc == 1) " contains" else "s contain"),
         "linkage", NA_real_, "Use complete linkage")
 
   ## ---- 6. matches resting on very few loci -------------------------------
-  if (!is.null(lr) && !is.null(lr$matched_pairs) && nrow(lr$matched_pairs) &&
-      !is.null(lr$matched_pairs$n_compared)) {
-    thin <- sum(lr$matched_pairs$n_compared < settings$min_loci * 1.3)
+  if (!is.null(cur) && !is.null(cur$matched_pairs) && nrow(cur$matched_pairs) &&
+      !is.null(cur$matched_pairs$n_compared)) {
+    thin <- sum(cur$matched_pairs$n_compared < settings$min_loci * 1.3)
     if (thin > 0 && settings$min_loci < ncol(res$gt) * 0.6)
       add("min_loci", "low",
           "Consider requiring more shared loci per pair",
@@ -2539,13 +2728,16 @@ gid_apply_spatial <- function(result, coords, sigma = NULL, post_cut = 0.999,
 # the match graph, which is what linkage = "single" does here.
 #
 # Sethi, S.A. et al. (2016) R. Soc. open sci. 3:160457.
+#
+# reps and sample_error work exactly as in gid_method_lr().
 
 gid_method_sethi <- function(gt, freqs = NULL, enc = NULL,
                              dropout = 0.02, false_allele = 0.005,
                              relationships = c("unrelated", "full_sib",
                                                "parent_offspring"),
                              lambda_cut = 1, min_loci = 15,
-                             linkage = "single", weights = NULL, reps = NULL) {
+                             linkage = "single", weights = NULL, reps = NULL,
+                             sample_error = TRUE) {
   if (is.null(enc))   enc   <- gid_encode(gt)
   if (is.null(freqs)) freqs <- gid_allele_freq(gt, weights)
 
@@ -2557,8 +2749,11 @@ gid_method_sethi <- function(gt, freqs = NULL, enc = NULL,
     orphan <- setdiff(rownames(gt), unique(rsm))
     if (length(orphan)) { rgt <- rbind(rgt, gt[orphan, , drop = FALSE])
                           rsm <- c(rsm, orphan) }
+    sse  <- gid_sample_error_arg(sample_error, rgt, rsm, freqs, dropout,
+                                 false_allele, rownames(gt), enc$dict)
     glik <- gid_geno_lik(rgt, rsm, freqs, dropout, false_allele,
-                         samples = rownames(gt), dict = enc$dict)
+                         samples = rownames(gt), dict = enc$dict,
+                         sample_scale = sse)
     pl <- gid_pair_loglik(glik, freqs, c("same_individual", relationships))
     n  <- length(rownames(gt))
     alt <- array(unlist(pl[relationships]), dim = c(n, n, length(relationships)))
@@ -2581,11 +2776,13 @@ gid_method_sethi <- function(gt, freqs = NULL, enc = NULL,
                 max_log10_lambda_observed =
                   if (nrow(pr)) max(pr$log10_lambda[pr$n_compared >= min_loci], -Inf) else NA,
                 alt_used = table(m$best_alternative),
+                sample_error = sse,
                 settings = list(dropout = mean(dropout),
                                 false_allele = mean(false_allele),
                                 relationships = relationships,
                                 lambda_cut = lambda_cut, min_loci = min_loci,
                                 linkage = linkage, input = "replicates",
+                                sample_error = !is.null(sse),
                                 reps_per_sample = mean(glik$n_reps),
                                 n_from_consensus = length(orphan))))
   }
@@ -2680,6 +2877,43 @@ gid_compare_methods <- function(results) {
        disagree_samples = ids[disagree],
        table = data.frame(sample = ids, disputed = disagree,
                           setNames(as.data.frame(parts), names(results)),
+                          stringsAsFactors = FALSE))
+}
+
+
+#' Where using every replicate and collapsing to a consensus first part ways.
+#'
+#' Both routes are worth running whenever replicates exist, because they
+#' assume different things about error. The consensus route treats every
+#' consensus call as equally reliable and refuses to call a locus whose
+#' reactions disagree. The replicate route keeps every reaction and assumes they
+#' err independently at their sample's own rate -- which errors repeated in all
+#' of one extract's reactions break, and which a dropout rate alone may not
+#' capture. Where the routes agree, the answer does not depend on the choice.
+#' Where they do not, one assumption is failing for those samples, and they
+#' are the ones to check by hand.
+#'
+#' A sample counts as placed differently when the set of OTHER samples it is
+#' grouped with changes; the individual labels themselves are arbitrary.
+#'
+#' @param reps,consensus results (anything with $assignment) from each route.
+gid_compare_routes <- function(reps, consensus) {
+  a <- reps$assignment
+  ids <- a$sample
+  ia <- a$individual
+  ib <- consensus$assignment$individual[match(ids, consensus$assignment$sample)]
+  ma <- split(ids, ia)[ia]
+  mb <- split(ids, ib)[ib]
+  moved <- vapply(seq_along(ids), function(k) !setequal(ma[[k]], mb[[k]]), TRUE)
+  only <- function(x, y) vapply(seq_along(ids), function(k)
+    paste(setdiff(x[[k]], c(y[[k]], ids[k])), collapse = ", "), "")
+  list(n_individuals = c(replicates = length(unique(ia)), consensus = length(unique(ib))),
+       ari = gid_ari(ia, ib), n_moved = sum(moved),
+       moved = data.frame(sample = ids[moved],
+                          animal_replicates = ia[moved],
+                          animal_consensus = ib[moved],
+                          joined_only_with_replicates = only(ma, mb)[moved],
+                          joined_only_with_consensus = only(mb, ma)[moved],
                           stringsAsFactors = FALSE))
 }
 

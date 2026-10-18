@@ -51,6 +51,15 @@ hint <- function(...) tags$p(class = "gid-hint", ...)
 ## running on a different error rate from the one reported beside it. Widen the
 ## range instead. The upper ends here match the sliders' own.
 GID_RATE_MAX <- c(dropout = 0.20, false_allele = 0.10)
+## Where the error-rate sliders start. Nobody chose these, so a run on a file
+## with replicates measures the rates instead of trusting them.
+GID_RATE_DEFAULT <- c(dropout = 0.005, false_allele = 0.002)
+## The multi-tube rule can leave a residual rate of one in a million on paper,
+## but no consensus call is that trustworthy: a swapped tube or a contaminated
+## extract does not care how many reactions agreed. Never go below this.
+GID_CONSENSUS_FLOOR <- 1e-4
+## rates span four orders of magnitude, so show significant figures
+gid_fmt_rate <- function(x) format(signif(x, 2), scientific = FALSE, drop0trailing = TRUE)
 gid_set_rate <- function(session, id, v) {
   v <- suppressWarnings(as.numeric(v))
   if (length(v) == 1 && is.finite(v) && v > GID_RATE_MAX[[id]])
@@ -59,25 +68,28 @@ gid_set_rate <- function(session, id, v) {
 }
 
 ## One place describing every method: drives the picker, the sidebar sections,
-## and the explainer at the top of the Individuals tab.
+## and the explainer at the top of the Individuals tab. Sethi comes first
+## because it is the default: it needs no alternative hypothesis and no prior,
+## the two choices a newcomer is least equipped to make.
 GID_METHODS <- list(
-  probabilistic = list(
-    label  = "Likelihood ratio",
-    anchor = "m-lr", tag = "recommended",
-    blurb  = paste("Asks how much more probable the two observed genotypes are if they",
-                   "came from one animal than from two, using an explicit dropout and",
-                   "false-allele error model, then converts that evidence into a",
-                   "posterior probability using a prior estimated from your data."),
-    good   = "You want a probability for every pair and control over how strict the cutoff is.",
-    watch  = "You must state what \u201ca different animal\u201d means. For group-living species that is full siblings, not unrelated animals."),
   sethi = list(
     label  = "Sethi et al. (2016)",
     anchor = "m-sethi", tag = "recommended",
-    blurb  = paste("Same likelihood, but divides by whichever relationship best explains",
-                   "the pair rather than one you nominate, and accepts a match on evidence",
-                   "alone (\u039b > 1) with no prior."),
-    good   = "You do not want to choose an alternative hypothesis, or to argue about a prior.",
+    blurb  = paste("Asks whether two samples' genotypes are better explained by one animal",
+                   "than by any relationship that could stand in for it \u2014 unrelated,",
+                   "full siblings, parent and offspring \u2014 using an explicit dropout and",
+                   "false-allele error model. A match is accepted on the evidence alone",
+                   "(\u039b > 1), with no prior."),
+    good   = "You do not want to choose an alternative hypothesis, or to argue about a prior. The default.",
     watch  = "\u039b > 1 takes no account of how many pairs you tested, so it merges more on large datasets."),
+  probabilistic = list(
+    label  = "Likelihood ratio",
+    anchor = "m-lr", tag = "recommended",
+    blurb  = paste("The same likelihood as Sethi, set against one alternative you name",
+                   "rather than the best of several, and turned into a posterior",
+                   "probability using a prior estimated from your data."),
+    good   = "You want a probability for every pair and control over how strict the cutoff is.",
+    watch  = "You must state what \u201ca different animal\u201d means. For group-living species that is full siblings, not unrelated animals."),
   threshold = list(
     label  = "Mismatch threshold",
     anchor = "m-thresh", tag = "gut check",
@@ -341,18 +353,23 @@ ui <- page_navbar(
       "output.has_reps == true",
       tags$div(class = "gid-flag gid-ok", style = "font-size:.8rem",
         tags$b("This file has several rows per sample."), " They look like PCR ",
-        "replicates. Using them directly is better than collapsing them to a ",
-        "consensus first \u2014 see Methods."),
+        "replicates, so genoID analyzes them both ways \u2014 every reaction ",
+        "directly, and collapsed to a consensus first \u2014 and reports both. ",
+        "See Methods."),
       selectInput("rep_col", "Replicate label column", choices = NULL),
       selectizeInput("rep_drop", "Row labels to exclude", choices = NULL,
                      multiple = TRUE,
                      options = list(placeholder = "e.g. consensus")),
       hint("Exclude any summary rows, such as a pre-computed consensus. ",
            "Everything left is treated as one PCR replicate."),
-      radioButtons("rep_mode", "Genotypes to analyze",
-                   c("Use every replicate observation (recommended)" = "reps",
-                     "Collapse to a consensus first" = "consensus"),
+      radioButtons("rep_mode", "Route the results tabs show",
+                   c("Every replicate reaction" = "reps",
+                     "A consensus genotype per sample" = "consensus"),
                    selected = "reps"),
+      hint("Both routes run either way, and the Method comparison tab sets ",
+           "them side by side. Using every reaction, with an error rate ",
+           "measured for each sample, was the more accurate in simulations. ",
+           "Where the two disagree, check those samples by hand."),
       uiOutput("rep_note")),
 
     selectizeInput("use_loci", "Loci to use", choices = NULL, multiple = TRUE,
@@ -366,7 +383,7 @@ ui <- page_navbar(
     tags$hr(style = "margin:.9rem 0 .8rem"),
 
     selectInput("method", "Method for the Individuals tab",
-                choices = GID_METHOD_CHOICES, selected = "probabilistic"),
+                choices = GID_METHOD_CHOICES, selected = "sethi"),
     uiOutput("method_hint"),
 
     ## Settings for the chosen method. The other methods keep their values while
@@ -426,16 +443,21 @@ ui <- page_navbar(
     ## error model: used by both likelihood methods
     conditionalPanel(
       "input.method == 'probabilistic' || input.method == 'sethi'",
-      sliderInput("dropout", "Allelic dropout rate", 0, 0.20, 0.005, step = 0.001),
-      sliderInput("false_allele", "False allele rate", 0, 0.10, 0.002, step = 0.001),
+      ## A residual consensus rate is often a few in ten thousand, so the step
+      ## has to be finer than that or the slider shows a rate in force as 0.
+      sliderInput("dropout", "Allelic dropout rate", 0, 0.20,
+                  GID_RATE_DEFAULT[["dropout"]], step = 0.0001),
+      sliderInput("false_allele", "False allele rate", 0, 0.10,
+                  GID_RATE_DEFAULT[["false_allele"]], step = 0.0001),
       actionButton("est_error", "Estimate these from my data",
                    icon = icon("wand-magic-sparkles"),
                    class = "btn-sm btn-outline-primary w-100"),
       uiOutput("est_error_note"),
       hint("Guessing these is the weakest part of the analysis. If you uploaded ",
-           "replicates, the app can measure them properly; if not, it can at least ",
-           "get the order of magnitude right. See ", tags$b("Measuring your own error rates"),
-           " on the Methods tab.")),
+           "replicates and leave these alone, they are measured from the ",
+           "replicates when you press Identify individuals; without replicates ",
+           "the button can at least get the order of magnitude right. See ",
+           tags$b("Measuring your own error rates"), " on the Methods tab.")),
 
     accordion(
       open = FALSE,
@@ -477,9 +499,9 @@ ui <- page_navbar(
              "answer moves, some clusters are held together by one edge.")),
       accordion_panel(
         "Which methods to run", value = "which", icon = icon("list-check"),
-        hint("The comparison tab runs everything checked here. Uncheck the slow ones ",
-             "if you only care about your chosen method."),
-        checkboxInput("run_sethi", "Sethi et al. (2016)", TRUE),
+        hint("Sethi, the likelihood ratio, exact matching and the mismatch ",
+             "threshold always run, so the comparison tab can set them side by ",
+             "side. GenAlEx is optional."),
         checkboxInput("run_genalex", "GenAlEx Matches", TRUE))
     ),
 
@@ -570,6 +592,20 @@ ui <- page_navbar(
       col_widths = c(12),
       card(card_header("Data checks"), uiOutput("flags"))
     ),
+    conditionalPanel("output.has_reps == true",
+      card(
+        card_header("How consistent each sample's replicates are"),
+        hint("The share of loci where a sample's own reactions do not all agree. ",
+             "One error rate for the whole dataset fits when these sit close ",
+             "together. When a minority of samples disagrees with itself far ",
+             "more than the rest, one rate under-describes them, and their ",
+             "recaptures get split off as new animals \u2014 which is why the ",
+             "replicate route measures an error rate for every sample."),
+        uiOutput("rep_quality_note"),
+        layout_columns(
+          col_widths = c(7, 5),
+          plotOutput("plot_rep_quality", height = 280),
+          DTOutput("tbl_rep_quality")))),
     card(
       card_header("Samples that may hold two animals"),
       hint("A scat carrying DNA from two animals reads heterozygous wherever ",
@@ -617,6 +653,7 @@ ui <- page_navbar(
     uiOutput("method_header"),
     uiOutput("run_status_ind"),
     uiOutput("power_warning"),
+    uiOutput("route_summary"),
     layout_columns(
       fill = FALSE, col_widths = c(3, 3, 3, 3),
       vbox("Individuals", "vb_ind", "paw", "primary", key = "n_individuals"),
@@ -703,6 +740,22 @@ ui <- page_navbar(
     "Method comparison", icon = icon("code-compare"),
     uiOutput("run_status_cmp"),
     card(card_header("How each method resolved the same data"), DTOutput("tbl_cmp")),
+    conditionalPanel("output.has_reps == true",
+      card(
+        card_header("Every replicate, or a consensus first?"),
+        hint("With replicates in the file, both likelihood methods run twice: on ",
+             "every PCR reaction, with each sample's own error rate, and on one ",
+             "consensus genotype per sample. The routes assume different things ",
+             "about error \u2014 that a sample's reactions err independently at ",
+             "that sample's rate, or that every consensus call is equally ",
+             "reliable \u2014 so where they disagree, one assumption is failing ",
+             "for those samples, and they are the ones to check by hand. Where ",
+             "they agree, the count does not depend on the choice."),
+        uiOutput("route_note"),
+        DTOutput("tbl_routes"),
+        tags$div(class = "gid-hint", style = "margin-top:.8rem",
+                 tags$b("Samples placed differently by the two routes")),
+        DTOutput("tbl_route_moved"))),
     card(
       card_header("Why the two recommended methods disagree"),
       hint("Both use the same genotype likelihood, so a disagreement can only ",
@@ -722,12 +775,11 @@ ui <- page_navbar(
            hint("A flat stretch means the answer is robust. A steady slide means the ",
                 "threshold, not the data, is deciding how many animals you have."))
     ),
-    conditionalPanel("input.run_sethi == true",
-      card(card_header("Sethi et al. \u2014 which relationship competed?"),
-        hint("For every pair called a match, the alternative hypothesis that came closest. ",
-             "If one relationship dominates, that is the null your other analyses should ",
-             "be using too."),
-        uiOutput("sethi_alt"))),
+    card(card_header("Sethi et al. \u2014 which relationship competed?"),
+      hint("For every pair called a match, the alternative hypothesis that came closest. ",
+           "If one relationship dominates, that is the null your other analyses should ",
+           "be using too."),
+      uiOutput("sethi_alt")),
     conditionalPanel("input.run_genalex == true",
       card(card_header("GenAlEx Matches output"),
         hint("The same three things GenAlEx's Multilocus \u2192 Matches routine reports: ",
@@ -744,10 +796,11 @@ ui <- page_navbar(
               "in a methods section."),
          DTOutput("tbl_disagree")),
     card(card_header("How many individuals under other settings"),
-         hint("The same data, re-run across the settings that matter most. If the ",
-              "count barely moves, the number is a property of your data. If it ",
-              "swings, it is a property of your choices, and the range belongs in ",
-              "your results. Your current setting is marked."),
+         hint("The same data, re-run with the likelihood ratio on consensus ",
+              "genotypes across the settings that matter most. If the count barely ",
+              "moves, the number is a property of your data. If it swings, it is a ",
+              "property of your choices, and the range belongs in your results. ",
+              "Your current setting is marked."),
          plotOutput("plot_sens", height = 330),
          DTOutput("tbl_sens"))
   ),
@@ -822,9 +875,9 @@ server <- function(input, output, session) {
     f <- f[file.exists(f)]
     if (!length(f)) return(showNotification("Example file not found.", type = "error"))
     raw(gid_read(f[1])); demo_loaded(TRUE)
-    ## The sliders are deliberately NOT set to the truth. The example now ships
-    ## with PCR replicates, so the point is to press "Estimate from replicates"
-    ## and watch the rates come back out of the data.
+    ## The sliders are deliberately NOT set to the truth. The example ships
+    ## with PCR replicates, so the rates come back out of the data, either from
+    ## "Estimate these from my data" or on the first run.
     updateNumericInput(session, "min_loci", value = 12)
   })
   observeEvent(input$file, demo_loaded(FALSE))
@@ -837,8 +890,9 @@ server <- function(input, output, session) {
       "consensus row \u2014 220 rows in all. It also carries sex, collection dates ",
       "across two field seasons, and coordinates.",
       tags$div(style = "margin-top:.3rem",
-        tags$b("Try this first: "), "press ", tags$b("Estimate from replicates"),
-        ". The data were simulated at ", tags$code("dropout 0.015"), " and ",
+        tags$b("Try this first: "), "press ", tags$b("Estimate these from my data"),
+        ", or just ", tags$b("Identify individuals"), ", which measures the rates ",
+        "itself. The data were simulated at ", tags$code("dropout 0.015"), " and ",
         tags$code("false allele 0.002"), " per reaction. Dropout comes back close ",
         "to 0.015; the false-allele estimate reads a little high, around 0.005, ",
         "with an interval that still covers 0.002 \u2014 that is the family group ",
@@ -938,84 +992,94 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "rep_drop", choices = v, selected = auto)
   })
 
-  ## Replicates the file contains, independent of whether the user chose to
-  ## analyze with them. Error rates can always be measured from replicates that
-  ## exist, even if the analysis is running on consensus calls.
-  reps_available <- reactive({
-    df <- raw()
-    if (is.null(df) || !isTRUE(has_reps()) || !nzchar(input$rep_col %||% "")) return(NULL)
-    if (!length(loci())) return(NULL)
-    df   <- df[!gid_blank_ids(df, input$id_col), , drop = FALSE]
-    if (!nrow(df)) return(NULL)
-    lab  <- as.character(df[[input$rep_col]])
-    keep <- !lab %in% (input$rep_drop %||% character(0))
-    if (!any(keep)) return(NULL)
-    ## gid_matrix() drops unusable ids itself, so the parallel vector of sample
-    ## names has to be taken from the same filtered frame or the two misalign.
-    list(gt = gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(),
-                         sep = gid_guess_sep(df, exclude = input$id_col),
-                         strip_flags = !isTRUE(input$drop_flagged)),
-         sample = as.character(df[[input$id_col]])[keep])
-  })
-
   ## ---- estimating the error rates from the data itself --------------------
   err_est <- reactiveVal(NULL)
+  ## A measurement belongs to the data it was made on.
+  observeEvent(list(raw(), input$id_col, input$rep_col, input$rep_drop, input$use_loci),
+               err_est(NULL), ignoreInit = TRUE)
+
+  ## The rates the app put in the sliders itself. Sliders still holding these
+  ## were never chosen by anyone, so a run on replicates measures the rates
+  ## rather than trusting them. That matters most for the replicate route: left
+  ## at the defaults, it would read a residual consensus rate as a per-reaction
+  ## one, expect ten times too little error, and split recaptures off as new
+  ## animals.
+  rates_auto <- reactiveVal(GID_RATE_DEFAULT)
+  set_rates <- function(d, f) {
+    d <- round(d, 4); f <- round(f, 4)
+    rates_auto(c(dropout = d, false_allele = f))
+    gid_set_rate(session, "dropout", d)
+    gid_set_rate(session, "false_allele", f)
+  }
+  ## within about half a slider step, since the slider rounds what it is given
+  rates_untouched <- function() {
+    v <- c(input$dropout %||% NA_real_, input$false_allele %||% NA_real_)
+    all(is.finite(v)) && all(abs(v - rates_auto()) < 6e-5)
+  }
+
+  ## Per-reaction rates measured from the replicates, and the residual rates
+  ## they leave on a consensus call. The replicate route needs the first, the
+  ## consensus route the second.
+  measure_error <- function(p, progress = NULL) {
+    rp <- p$reps_all
+    e <- gid_estimate_error(p$gt, rp, progress = progress)
+    if (!identical(e$method, "replicates")) return(e)
+    pe <- gid_propagate_error(e$dropout, e$false_allele, n_rep = p$n_rep,
+                              rule = "taberlet", hom_n = p$hom_n, het_n = p$het_n,
+                              per_rep_missing = mean(is.na(rp$gt)))
+    c(e, list(consensus_dropout = max(pe[["dropout"]], GID_CONSENSUS_FLOOR),
+              consensus_false   = max(pe[["false_allele"]], GID_CONSENSUS_FLOOR)))
+  }
+  ## the measured rates on the scale of one route
+  measured_for <- function(e, route) {
+    if (is.null(e) || !identical(e$method, "replicates")) return(NULL)
+    if (route == "reps") c(dropout = e$dropout, false_allele = e$false_allele)
+    else c(dropout = e$consensus_dropout, false_allele = e$consensus_false)
+  }
+
   observeEvent(input$est_error, {
     p <- try(prep(), silent = TRUE)
     if (inherits(p, "try-error") || is.null(p))
       return(showNotification("Load a file and choose your loci first.", type = "warning"))
-    rp <- reps_available()
     ## The bar used to be pinned at 0.4 for the whole computation, so a slow
     ## estimate was indistinguishable from a hang. It now reports each stage.
     e <- try(withProgress(
       message = "Measuring genotyping error", value = 0.05,
       detail = "preparing",
-      gid_estimate_error(
-        p$gt, rp,
-        progress = function(v, d) setProgress(value = v, detail = d))),
+      if (is.null(p$reps_all)) gid_estimate_error(p$gt)
+      else measure_error(p, progress = function(v, d) setProgress(value = v, detail = d))),
       silent = TRUE)
     if (inherits(e, "try-error"))
       return(showNotification(paste("Could not estimate:", conditionMessage(attr(e, "condition"))),
                               type = "error"))
     err_est(e)
-    ## Replicate rates apply to a single reaction. If the analysis is running on
-    ## consensus calls, the model wants the much smaller rate that survives the
-    ## consensus rule, so convert before filling the sliders in.
-    d <- e$dropout; f <- e$false_allele
-    converted <- FALSE
-    if (identical(e$method, "replicates") && is.null(p$reps)) {
-      n_per <- mean(table(rp$sample))
-      pr <- gid_propagate_error(d, f, n_rep = max(2L, round(n_per)),
-                                rule = "taberlet", hom_n = 3, het_n = 2,
-                                per_rep_missing = mean(is.na(rp$gt)),
-                                nsim = 20000)
-      d <- max(pr[["dropout"]], 1e-4); f <- max(pr[["false_allele"]], 1e-4)
-      converted <- TRUE
-    }
-    err_est(c(e, list(applied_dropout = d, applied_false = f, converted = converted)))
-    if (is.na(f)) f <- max(0.001, round(d / 3, 3))
-    gid_set_rate(session, "dropout", round(d, 3))
-    gid_set_rate(session, "false_allele", round(f, 3))
+    ## The sliders hold the rate for the route the tabs show: per reaction on
+    ## the replicate route, the residual rate of a consensus call otherwise.
+    r <- measured_for(e, if (is.null(p$reps)) "consensus" else "reps")
+    if (!is.null(r)) set_rates(r[["dropout"]], r[["false_allele"]])
+    else set_rates(e$dropout, max(0.001, round(e$dropout / 3, 3)))
   })
 
   output$est_error_note <- renderUI({
     e <- err_est(); if (is.null(e)) return(NULL)
     if (identical(e$method, "replicates"))
       tags$div(class = "gid-flag gid-ok", style = "font-size:.78rem;margin:.5rem 0",
-        tags$b("Measured from your replicates."), " Maximum likelihood over ",
-        e$n_samples, " samples, integrating over the unknown true genotype so no ",
-        "consensus is involved.",
+        tags$b(if (isTRUE(e$auto)) "Measured from your replicates when you ran the analysis."
+               else "Measured from your replicates."),
+        " Maximum likelihood over ", e$n_samples, " samples, integrating over ",
+        "the unknown true genotype so no consensus is involved. Per reaction:",
         tags$div(style = "margin-top:.3rem;font-family:var(--bs-font-monospace)",
           sprintf("dropout %.3f [%.3f-%.3f]   false allele %.3f [%.3f-%.3f]",
                   e$dropout, e$dropout_ci[1], e$dropout_ci[2],
                   e$false_allele, e$false_ci[1], e$false_ci[2])),
         tags$div(style = "margin-top:.3rem",
-          if (isTRUE(e$converted)) tagList(
-            "You are analyzing consensus calls, so the sliders were set to the ",
-            "much smaller residual rate that survives the multi-tube rule: ",
-            tags$code(sprintf("dropout %.4f, false allele %.4f",
-                              e$applied_dropout, e$applied_false)), ".")
-          else "These are per-reaction rates, which is what the replicate route wants."))
+          "These drive the replicate route, where a sample whose reactions err ",
+          "more often is also given higher rates of its own. The consensus ",
+          "route uses the much smaller rates left ",
+          "after the multi-tube rule: ",
+          tags$code(sprintf("dropout %s, false allele %s",
+                            gid_fmt_rate(e$consensus_dropout), gid_fmt_rate(e$consensus_false))), ". ",
+          "The sliders show the rates for the route the tabs show."))
     else
       tags$div(class = "gid-flag", style = "font-size:.78rem;margin:.5rem 0",
         tags$b("No replicates, so this is a rough estimate only."), " Dropout ",
@@ -1037,14 +1101,15 @@ server <- function(input, output, session) {
     if (!isTRUE(has_reps())) return(NULL)
     if (identical(input$rep_mode, "reps"))
       tags$p(class = "gid-hint",
-        tags$b("The dropout and false-allele rates below now mean per-reaction "),
+        tags$b("The dropout and false-allele rates below mean per-reaction "),
         tags$b("rates"), ", not the residual rates of a consensus call. They are ",
         "typically ten to a hundred times larger \u2014 a few percent rather than ",
-        "a few tenths of a percent.")
+        "a few tenths of a percent. Each sample's own rate is measured on top.")
     else
       tags$p(class = "gid-hint",
         "Replicates are collapsed with the multi-tube rule: a heterozygote ",
-        "accepted on two replicates, a homozygote only on three.")
+        "accepted on two replicates, a homozygote only on three. The rates ",
+        "below are the small residual rates of those consensus calls.")
   })
 
   detected <- reactive({
@@ -1126,11 +1191,24 @@ server <- function(input, output, session) {
       rgt  <- gid_matrix(df[keep, , drop = FALSE], input$id_col, loci(), sep = sep,
                          strip_flags = !isTRUE(input$drop_flagged))
       rsm  <- ids[keep]
-      gt   <- gid_consensus_from_reps(rgt, rsm)
-      reps <- if (use_reps) list(gt = rgt, sample = rsm) else NULL
-      grp  <- if (nzchar(input$group_col %||% ""))
-        as.character(df[[input$group_col]])[keep][match(rownames(gt), rsm)]
-        else rep("all", nrow(gt))
+      ## A homozygote needs three agreeing reactions under the multi-tube
+      ## rule, which a lab that runs duplicates can never supply: every
+      ## homozygous locus would come out missing. So the rule asks for no more
+      ## agreeing reactions than a typical sample has -- with two, both must
+      ## agree; with one, the call stands as it is.
+      n_rep <- max(1L, as.integer(round(stats::median(table(rsm)))))
+      hom_n <- min(3L, n_rep)
+      het_n <- min(2L, n_rep)
+      gt   <- gid_consensus_from_reps(rgt, rsm, hom_n = hom_n, het_n = het_n)
+      ## A sample's label can sit on any of its rows -- some pipelines write
+      ## the species only on the summary row excluded above -- so take the
+      ## first non-blank one across all of them.
+      grp  <- if (nzchar(input$group_col %||% "")) {
+        gv <- trimws(as.character(df[[input$group_col]]))
+        gv[!nzchar(gv)] <- NA
+        first <- tapply(gv, ids, function(v) if (any(!is.na(v))) v[!is.na(v)][1] else NA_character_)
+        unname(first[rownames(gt)])
+      } else rep("all", nrow(gt))
       names(grp) <- rownames(gt)
       grp[is.na(grp) | !nzchar(grp)] <- "unassigned"
       f <- gid_filter(gt,
@@ -1139,10 +1217,13 @@ server <- function(input, output, session) {
       validate(need(nrow(f$gt) >= 2,
         "Fewer than two samples survive the call-rate filters. Lower them in the sidebar."),
         need(ncol(f$gt) >= 1, "No loci survive the call-rate filter."))
-      if (!is.null(reps))
-        reps$gt <- reps$gt[, colnames(f$gt), drop = FALSE]
+      ## Every reaction is kept whichever route the tabs show, because both
+      ## routes run: reps is the route on screen, reps_all is always there.
+      reps_all <- list(gt = rgt[, colnames(f$gt), drop = FALSE], sample = rsm)
       mx <- mix_step(f$gt)
-      return(list(gt = mx$gt, grp = grp[rownames(mx$gt)], raw_gt = gt, reps = reps,
+      return(list(gt = mx$gt, grp = grp[rownames(mx$gt)], raw_gt = gt,
+                  reps = if (use_reps) reps_all else NULL, reps_all = reps_all,
+                  n_rep = n_rep, hom_n = hom_n, het_n = het_n,
                   dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples,
                   mixture = mx$mixture, dropped_mixtures = mx$dropped,
                   df = df, n_reps = length(rsm) / nrow(gt)))
@@ -1167,6 +1248,7 @@ server <- function(input, output, session) {
                   "No loci survive the call-rate filter. Lower it in the sidebar."))
     mx <- mix_step(f$gt)
     list(gt = mx$gt, grp = grp[rownames(mx$gt)], raw_gt = gt, reps = NULL,
+         reps_all = NULL,
          dropped_loci = f$dropped_loci, dropped_samples = f$dropped_samples,
          mixture = mx$mixture, dropped_mixtures = mx$dropped, df = df)
   })
@@ -1197,11 +1279,19 @@ server <- function(input, output, session) {
     if (nre > 0) f <- c(f, list(bad(sprintf(
       "%d genotype cells had their two alleles written in the other order (AG vs GA). They are now normalized; compared as raw text they would have counted as mismatches.", nre))))
 
-    nflag <- sum(grepl("[*?!#]", as.matrix(p$df[, lcols])))
+    flagged <- grepl("[*?!#]", as.matrix(p$df[, lcols]))
+    nflag <- sum(flagged)
+    ## A flag that only ever lands on heterozygotes usually marks an allele
+    ## ratio outside the heterozygote range -- exactly the call a false allele
+    ## produces -- so it is worth naming.
+    het_only <- nflag >= 20 && all(vapply(which(flagged), function(k) {
+      a <- strsplit(norm_m[k], "/", fixed = TRUE)[[1]]
+      length(a) == 2 && a[1] != a[2] }, TRUE))
     if (nflag > 0) f <- c(f, list(bad(sprintf(
-      "%d cells carry a quality flag character (%s). %s", nflag,
+      "%d cells carry a quality flag character (%s).%s %s", nflag,
       if (isTRUE(input$drop_flagged)) "discarded as missing"
       else "the flag was stripped and the call kept",
+      if (het_only) " Every one of them is a heterozygote, which usually means the flag marks an allele ratio outside the heterozygote range \u2014 the call a false allele makes." else "",
       if (isTRUE(input$drop_flagged))
         "Uncheck \"Treat quality-flagged calls as missing\" in the sidebar to keep them instead."
       else "If your pipeline uses the flag to mean \"low confidence\", check \"Treat quality-flagged calls as missing\" in the sidebar and re-run to see how much it moves the answer."))))
@@ -1231,8 +1321,8 @@ server <- function(input, output, session) {
       "%d rows for %d samples, read as replicate reactions from the %s column. %s",
       nrow(p$df), nrow(p$gt), input$rep_col,
       if (identical(input$rep_mode, "reps"))
-        "Every reaction is being used directly, which is the stronger route."
-      else "They are being collapsed to a consensus first."))))
+        "The tabs show every reaction used directly; the consensus route runs alongside."
+      else "The tabs show consensus genotypes; the route using every reaction runs alongside."))))
 
     if (length(p$dropped_loci)) f <- c(f, list(bad(paste0(
       "Loci dropped for low call rate or being monomorphic: ",
@@ -1370,20 +1460,100 @@ server <- function(input, output, session) {
   ## ------------------------------------------------------------- run methods
   run_error <- reactiveVal(NULL)
 
-  res <- eventReactive(run_count(), ignoreInit = TRUE, {
+  ## The residual rates a consensus call is left with, given per-reaction ones.
+  to_consensus <- function(p, r) {
+    pe <- gid_propagate_error(r[["dropout"]], r[["false_allele"]], n_rep = p$n_rep,
+                              rule = "taberlet", hom_n = p$hom_n, het_n = p$het_n,
+                              per_rep_missing = mean(is.na(p$reps_all$gt)))
+    c(dropout = max(pe[["dropout"]], GID_CONSENSUS_FLOOR),
+      false_allele = max(pe[["false_allele"]], GID_CONSENSUS_FLOOR))
+  }
+
+  ## The error rates each route runs on. The sliders hold the rate for the
+  ## route the tabs show, and the other route's rate follows from it or from
+  ## the replicates. Sliders nobody has touched are replaced by rates measured
+  ## from the replicates, so someone who never opens the error panel still
+  ## runs on their own data's rates rather than on defaults.
+  route_rates <- function(p, progress = NULL) {
+    slid <- c(dropout = input$dropout, false_allele = input$false_allele)
+    if (is.null(p$reps_all))
+      return(list(primary = "consensus", consensus = slid, reps = NULL,
+                  source = c(consensus = "set in the sidebar")))
+    primary <- if (is.null(p$reps)) "consensus" else "reps"
+    manual  <- !rates_untouched()
+    e <- err_est()
+    if (!(manual && primary == "reps") && is.null(measured_for(e, "reps"))) {
+      e <- tryCatch(measure_error(p, progress), error = function(err) NULL)
+      if (!is.null(e)) err_est(c(e, list(auto = TRUE)))
+    }
+    R <- if (manual && primary == "reps") slid else measured_for(e, "reps")
+    C <- if (manual && primary == "consensus") slid
+         else if (!is.null(R)) to_consensus(p, R)
+    ## too few replicated samples to fit: the sliders are all there is
+    if (is.null(R) && primary == "reps") R <- slid
+    if (is.null(C)) C <- slid
+    if (!manual) {
+      v <- if (primary == "reps") R else C
+      set_rates(v[["dropout"]], v[["false_allele"]])
+    }
+    meas <- !is.null(measured_for(e, "reps"))
+    list(primary = primary, reps = R, consensus = C,
+         source = c(
+           reps = if (manual && primary == "reps") "set in the sidebar"
+                  else if (meas) "measured from the replicates"
+                  else "the defaults, since too few samples were replicated to measure them",
+           consensus = if (manual && primary == "consensus") "set in the sidebar"
+                       else if (manual) "the sidebar's per-reaction rates, through the multi-tube rule"
+                       else if (meas) "the measured rates, through the multi-tube rule"
+                       else "the defaults"))
+  }
+
+  ## Not ignoreInit: Shiny skips an eventReactive's first evaluation, not its
+  ## first event, so anything read for the first time after a run would sit
+  ## blank until the next one. Waiting on the counter does the same job safely.
+  res <- eventReactive(run_count(), {
+    req(run_count() > 0)
     p <- prep(); req(p, nrow(p$gt) >= 2)
     run_error(NULL)
     out <- tryCatch(withProgress(message = "Identifying individuals", value = 0, {
+      rates <- route_rates(p, progress = function(v, d)
+        setProgress(value = 0.3 * v, detail = paste("measuring error:", d)))
       pr <- if (is.na(input$prior)) NULL else input$prior
-      incProgress(0.15, detail = "probabilistic")
-      lr <- gid_by_group(p$gt, p$grp, gid_method_lr, dropout = input$dropout,
-                         false_allele = input$false_allele, kinship = input$kinship,
-                         post_cut = input$post_cut, min_loci = input$min_loci,
-                         linkage = input$linkage, prior_same = pr, reps = p$reps)
-      incProgress(0.3, detail = "exact match")
+
+      ## Sethi and the likelihood ratio on one route. Exact matching, the
+      ## mismatch threshold and GenAlEx compare one genotype per sample, so
+      ## they always run on the consensus.
+      likelihood_methods <- function(route) {
+        rr <- rates[[route]]
+        rp <- if (route == "reps") p$reps_all else NULL
+        list(
+          sethi = if (length(input$sethi_rel))
+            gid_by_group(p$gt, p$grp, gid_method_sethi,
+                         dropout = rr[["dropout"]], false_allele = rr[["false_allele"]],
+                         relationships = input$sethi_rel, lambda_cut = input$lambda_cut,
+                         min_loci = input$min_loci, linkage = input$linkage, reps = rp),
+          probabilistic = gid_by_group(p$gt, p$grp, gid_method_lr,
+                         dropout = rr[["dropout"]], false_allele = rr[["false_allele"]],
+                         kinship = input$kinship, post_cut = input$post_cut,
+                         min_loci = input$min_loci, linkage = input$linkage,
+                         prior_same = pr, reps = rp))
+      }
+      setProgress(0.32, detail = "Sethi and the likelihood ratio")
+      routes <- list()
+      routes[[rates$primary]] <- likelihood_methods(rates$primary)
+      ## With replicates in the file, the route not on screen runs too.
+      other <- setdiff(c("reps", "consensus"), rates$primary)
+      if (!is.null(p$reps_all) && !is.null(rates[[other]])) {
+        setProgress(0.5, detail = if (other == "reps") "every replicate reaction"
+                                  else "consensus genotypes")
+        routes[[other]] <- likelihood_methods(other)
+      }
+      lr <- routes[[rates$primary]]$probabilistic
+
+      setProgress(0.68, detail = "exact match")
       ex <- gid_by_group(p$gt, p$grp, gid_method_exact,
                          min_loci = input$min_loci, linkage = input$linkage)
-      incProgress(0.2, detail = "mismatch threshold")
+      setProgress(0.75, detail = "mismatch threshold")
       th <- gid_by_group(p$gt, p$grp, gid_method_threshold,
                          max_mismatch = input$max_mismatch, min_loci = input$min_loci,
                          linkage = input$linkage)
@@ -1394,34 +1564,46 @@ server <- function(input, output, session) {
       if (isTRUE(input$use_spatial)) {
         cc <- try(map_api$coords(), silent = TRUE)
         if (!inherits(cc, "try-error") && !is.null(cc) && nrow(cc) > 1) {
-          incProgress(0.05, detail = "spatial evidence")
+          setProgress(0.8, detail = "spatial evidence")
           lr2 <- try(gid_apply_spatial(lr, cc, post_cut = input$post_cut,
                                        linkage = input$linkage), silent = TRUE)
           if (!inherits(lr2, "try-error")) lr <- lr2
           else spatial_note <- "Spatial evidence could not be calibrated; genetics only."
         } else spatial_note <- "No usable coordinates, so spatial evidence was skipped."
       }
-      out <- list(exact = ex, threshold = th, probabilistic = lr)
-      if (isTRUE(input$run_sethi) && length(input$sethi_rel)) {
-        incProgress(0.15, detail = "Sethi et al. match calling")
-        out$sethi <- gid_by_group(p$gt, p$grp, gid_method_sethi,
-                                  dropout = input$dropout, false_allele = input$false_allele,
-                                  relationships = input$sethi_rel,
-                                  lambda_cut = input$lambda_cut,
-                                  min_loci = input$min_loci, linkage = input$linkage,
-                                  reps = p$reps)
-      }
+      out <- list(exact = ex, threshold = th, probabilistic = lr,
+                  sethi = routes[[rates$primary]]$sethi)
       if (isTRUE(input$run_genalex)) {
-        incProgress(0.1, detail = "GenAlEx Matches")
+        setProgress(0.85, detail = "GenAlEx Matches")
         out$genalex <- gid_by_group(p$gt, p$grp, gid_method_genalex,
                                     min_loci = input$min_loci,
                                     near_match_loci = input$near_match,
                                     linkage = input$linkage)
       }
-      incProgress(0.1, detail = "comparing")
+      out <- Filter(Negate(is.null), out)
+
+      ## Where the two routes part ways, for each likelihood method. Compared
+      ## on genetics alone, since spatial evidence is added to one route only.
+      route_cmp <- NULL
+      if (length(routes) == 2) {
+        keys <- intersect(names(Filter(Negate(is.null), routes$reps)),
+                          names(Filter(Negate(is.null), routes$consensus)))
+        route_cmp <- setNames(lapply(keys, function(k)
+          gid_compare_routes(routes$reps[[k]], routes$consensus[[k]])), keys)
+      }
+      ## how much more often each sample errs than typical, as the replicate
+      ## route measured it
+      own_error <- NULL
+      src <- routes$reps$sethi %||% routes$reps$probabilistic
+      if (!is.null(src))
+        own_error <- unlist(unname(lapply(src$by_group, function(e) e$sample_error)))
+
+      setProgress(0.95, detail = "comparing")
       ord <- c("exact", "threshold", "genalex", "sethi", "probabilistic")
       list(methods = out[ord[ord %in% names(out)]], spatial_note = spatial_note,
            cmp = gid_compare_methods(out), gt = p$gt, grp = p$grp,
+           rates = rates, routes = routes, route_cmp = route_cmp,
+           own_error = own_error,
            sweep = gid_threshold_sweep(p$gt, max_k = 6, min_loci = input$min_loci,
                                        linkage = input$linkage))
     }), error = function(e) { run_error(conditionMessage(e)); NULL })
@@ -1432,13 +1614,14 @@ server <- function(input, output, session) {
   best <- reactive({
     r <- res(); req(r)
     m <- r$methods[[input$method]]
-    validate(need(!is.null(m), sprintf(
-      "%s was not run. Check it under \"Which methods to run\" in the sidebar, then press Identify individuals.",
-      GID_METHODS[[input$method]]$label)))
+    validate(need(!is.null(m), switch(input$method,
+      sethi = "Sethi needs at least one competing relationship. Choose one in the sidebar, then press Identify individuals.",
+      sprintf("%s was not run. Check it under \"Which methods to run\" in the sidebar, then press Identify individuals.",
+              GID_METHODS[[input$method]]$label))))
     m
   })
 
-  meta <- reactive(GID_METHODS[[input$method %||% "probabilistic"]])
+  meta <- reactive(GID_METHODS[[input$method %||% "sethi"]])
 
   output$method_hint <- renderUI(
     tags$p(class = "gid-hint", style = "margin-top:-.4rem", meta()$blurb))
@@ -1508,6 +1691,13 @@ server <- function(input, output, session) {
     NULL
   }
   ## ---- what to change before the next run ---------------------------------
+  ## Enough samples typed more than once to measure error from: a file can
+  ## repeat its sample ids yet hold one usable reaction each once rows are
+  ## excluded.
+  replicated <- reactive({
+    p <- tryCatch(prep(), error = function(e) NULL)
+    !is.null(p$reps_all) && sum(table(p$reps_all$sample) >= 2) >= 5
+  })
   advice <- reactive({
     r <- res(); req(r)
     cal <- tryCatch({
@@ -1517,18 +1707,28 @@ server <- function(input, output, session) {
       attr(x, "max_posterior") <- x$max_post[1]
       x
     }, error = function(e) NULL)
+    ## Rates in force and rates measured, both on the scale of the route on
+    ## screen, or the comparison is between a per-reaction and a residual rate.
+    ## Only a measurement from replicates is worth holding the sliders to; the
+    ## heterozygote-deficit figure is an order of magnitude, not a target.
+    inforce <- r$rates[[r$rates$primary]]
+    e <- err_est()
+    m <- measured_for(e, r$rates$primary)
+    e <- if (is.null(m)) NULL
+         else modifyList(e, list(dropout = m[["dropout"]], false_allele = m[["false_allele"]]))
     gid_advise(
       r,
-      settings = list(post_cut = input$post_cut, dropout = input$dropout,
-                      false_allele = input$false_allele, kinship = input$kinship,
+      settings = list(post_cut = input$post_cut, dropout = inforce[["dropout"]],
+                      false_allele = inforce[["false_allele"]], kinship = input$kinship,
                       min_loci = input$min_loci, linkage = input$linkage,
                       lambda_cut = input$lambda_cut,
                       budget = input$err_budget %||% 1),
-      err_measured = err_est(),
+      err_measured = e,
       calib = cal,
       pid = tryCatch(pid(), error = function(e) NULL),
-      has_reps = isTRUE(has_reps()),
-      using_reps = isTRUE(has_reps()) && identical(input$rep_mode, "reps"))
+      has_reps = replicated(),
+      shown = input$method,
+      routes = r$route_cmp[[input$method]])
   })
 
   output$advice_card <- renderUI({
@@ -1536,9 +1736,11 @@ server <- function(input, output, session) {
     if (is.null(a) || !nrow(a))
       return(tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
         tags$b("Nothing to change. "),
-        "Every setting is consistent with what this data supports: the cutoff is ",
-        "reachable and on a plateau, the error rates match your replicates, and ",
-        "no cluster is held together by a chain."))
+        "Every setting is consistent with what this data supports: ",
+        if (identical(input$method, "probabilistic"))
+          "the cutoff is reachable and on a plateau, ",
+        if (replicated()) "the error rates match your replicates, ",
+        "and no cluster is held together by a chain."))
     chip <- function(sev) tags$span(
       class = paste0("gid-sev gid-sev-", sev),
       switch(sev, high = "change this", medium = "worth changing", "consider"))
@@ -1583,18 +1785,15 @@ server <- function(input, output, session) {
       linkage    = updateRadioButtons(session, "linkage", selected = "complete"),
       min_loci   = updateNumericInput(session, "min_loci", value = row$value),
       lambda_cut = updateNumericInput(session, "lambda_cut", value = row$value),
-      rep_mode   = updateRadioButtons(session, "rep_mode", selected = "reps"),
       error_rates = {
-        e <- err_est(); req(e)
-        d <- e$applied_dropout %||% e$dropout
-        f <- e$applied_false   %||% e$false_allele
-        gid_set_rate(session, "dropout", round(d, 4))
-        gid_set_rate(session, "false_allele", round(f, 4))
+        m <- measured_for(err_est(), if (identical(input$rep_mode, "consensus")) "consensus" else "reps")
+        req(m)
+        set_rates(m[["dropout"]], m[["false_allele"]])
       })
     showNotification("Setting changed. Press Identify individuals to re-run.",
                      type = "message", duration = 6)
   }
-  for (.id in c("cutoff_unreachable", "cutoff_plateau", "error_rates", "use_reps",
+  for (.id in c("cutoff_unreachable", "cutoff_plateau", "error_rates",
                 "kinship", "linkage", "min_loci", "sethi_gap"))
     local({
       id <- .id
@@ -1623,8 +1822,8 @@ server <- function(input, output, session) {
     r <- tryCatch(res(), error = function(e) NULL); req(r)
     if (is.null(r$methods$sethi))
       return(tags$div(class = "gid-flag",
-        "Sethi was not run, so there is nothing to compare. Check it under ",
-        tags$b("Which methods to run"), " in the sidebar."))
+        "Sethi was not run, so there is nothing to compare. Choose at least one ",
+        "competing relationship for it in the sidebar."))
     d <- tryCatch(lr_sethi(), error = function(e) NULL)
     n_lr <- length(unique(r$methods$probabilistic$assignment$individual))
     n_se <- length(unique(r$methods$sethi$assignment$individual))
@@ -1654,6 +1853,163 @@ server <- function(input, output, session) {
     if (is.null(d) || !nrow(d))
       return(dt(data.frame(message = "The two methods agree on every pair.")))
     dt(d)
+  })
+
+  ## ---- every replicate, or a consensus first ------------------------------
+  route_label <- function(rt) if (rt == "reps") "every replicate reaction" else "consensus first"
+
+  output$route_summary <- renderUI({
+    r <- tryCatch(res(), error = function(e) NULL); req(r)
+    if (length(r$routes) < 2) return(NULL)
+    rc <- r$route_cmp[[input$method]]
+    if (is.null(rc))
+      return(tags$p(class = "gid-hint", style = "margin:-.4rem 0 1rem",
+        "This method compares one genotype per sample, so it runs on the ",
+        "consensus whichever route you chose. Sethi and the likelihood ratio ",
+        "run on both; the Method comparison tab sets them side by side."))
+    n <- rc$n_individuals
+    shown <- if (r$rates$primary == "reps")
+      "every replicate reaction, with each sample's own error rate"
+      else "one consensus genotype per sample"
+    if (rc$n_moved == 0)
+      return(tags$div(class = "gid-flag gid-ok", style = "margin-bottom:1rem",
+        tags$b(sprintf("Both routes agree: %d individuals ", n[["replicates"]]),
+               "whether every replicate is used or a consensus is taken first. "),
+        sprintf("The results below use %s.", shown)))
+    tags$div(class = "gid-flag", style = "margin-bottom:1rem",
+      tags$b(sprintf("Every replicate gives %d individuals; a consensus first gives %d. ",
+                     n[["replicates"]], n[["consensus"]])),
+      sprintf("The results below use %s. ", shown),
+      sprintf("%d sample%s placed differently by the two routes",
+              rc$n_moved, if (rc$n_moved == 1) " is" else "s are"),
+      " — they are listed on the ", tags$b("Method comparison"), " tab, and ",
+      "they are the ones to check by hand before you report a count.",
+      if (identical(input$method, "probabilistic") && isTRUE(input$use_spatial))
+        " Both counts are from genetics alone.")
+  })
+
+  output$route_note <- renderUI({
+    r <- tryCatch(res(), error = function(e) NULL); req(r)
+    rr <- r$rates
+    if (length(r$routes) < 2)
+      return(tags$div(class = "gid-flag",
+        if (is.null(rr$reps))
+          paste("The replicate route was not run: too few samples have two or",
+                "more reactions to measure the per-reaction error rates it needs.")
+        else "Only one route was run."))
+    oe <- r$own_error
+    n_hi <- sum(oe > 1, na.rm = TRUE)
+    tags$p(class = "gid-hint",
+      tags$b("Every replicate reaction: "),
+      sprintf("dropout %s and false allele %s per reaction, %s. ",
+              gid_fmt_rate(rr$reps[["dropout"]]), gid_fmt_rate(rr$reps[["false_allele"]]),
+              rr$source[["reps"]]),
+      if (length(oe)) sprintf("%d of %d samples err more often than that, by up to %s times, and %s given rates of %s own. ",
+                              n_hi, length(oe), format(max(oe, na.rm = TRUE)),
+                              if (n_hi == 1) "was" else "were", if (n_hi == 1) "its" else "their"),
+      tags$b("Consensus first: "),
+      sprintf("dropout %s and false allele %s per consensus call, from %s.",
+              gid_fmt_rate(rr$consensus[["dropout"]]), gid_fmt_rate(rr$consensus[["false_allele"]]),
+              rr$source[["consensus"]]))
+  })
+
+  output$tbl_routes <- renderDT({
+    r <- res(); req(length(r$routes) == 2)
+    x <- do.call(rbind, lapply(names(r$route_cmp), function(k) {
+      rc <- r$route_cmp[[k]]
+      do.call(rbind, lapply(c("reps", "consensus"), function(rt) {
+        s <- gid_summarise_assignment(r$routes[[rt]][[k]]$assignment)
+        data.frame(method = k, route = route_label(rt), shown = rt == r$rates$primary,
+                   dropout = signif(r$rates[[rt]][["dropout"]], 3),
+                   false_allele = signif(r$rates[[rt]][["false_allele"]], 3),
+                   n_individuals = s$n_individuals, n_singletons = s$n_singletons,
+                   agreement_between_routes = round(rc$ari, 3),
+                   samples_placed_differently = rc$n_moved,
+                   stringsAsFactors = FALSE)
+      }))
+    }))
+    dt(x)
+  })
+
+  route_moved <- reactive({
+    r <- res(); req(length(r$routes) == 2)
+    x <- do.call(rbind, lapply(names(r$route_cmp), function(k) {
+      mv <- r$route_cmp[[k]]$moved
+      if (!nrow(mv)) return(NULL)
+      if (!is.null(r$own_error)) mv$own_error <- unname(r$own_error[mv$sample])
+      cbind(method = k, mv, stringsAsFactors = FALSE)
+    }))
+    if (is.null(x)) data.frame() else x
+  })
+
+  output$tbl_route_moved <- renderDT({
+    x <- route_moved()
+    if (!nrow(x))
+      return(dt(data.frame(message = "The two routes group every sample the same way.")))
+    dt(x)
+  })
+
+  ## ---- how consistent each sample's replicates are ------------------------
+  rep_quality <- reactive({
+    p <- prep(); req(p, p$reps_all)
+    d <- gid_replicate_discordance(p$reps_all$gt, p$reps_all$sample)
+    d <- d[d$sample %in% rownames(p$gt), , drop = FALSE]
+    r <- tryCatch(res(), error = function(e) NULL)
+    if (!is.null(r$own_error)) d$own_error <- unname(r$own_error[d$sample])
+    d
+  })
+
+  output$rep_quality_note <- renderUI({
+    d <- rep_quality()
+    q <- gid_quality_spread(d)
+    if (is.null(q))
+      return(tags$p(class = "gid-hint",
+        "Too few samples have loci typed twice or more to judge the spread."))
+    r <- tryCatch(res(), error = function(e) NULL)
+    own <- if (!is.null(d$own_error)) {
+      n_hi <- sum(d$own_error > 1, na.rm = TRUE)
+      sprintf(" On the last run, %d sample%s given error rates of %s own, above the dataset's.",
+              n_hi, if (n_hi == 1) " was" else "s were", if (n_hi == 1) "its" else "their")
+    }
+    if (q$uneven)
+      tags$div(class = "gid-flag", style = "margin-bottom:.6rem",
+        tags$b(sprintf("%d of %d samples (%.0f%%) are much noisier than the rest. ",
+                       q$n_noisy, q$n, 100 * q$share_noisy)),
+        sprintf(paste("Their reactions disagree at more than %.0f%% of their replicated loci,",
+                      "against %.0f%% for the typical sample. One error rate for the whole",
+                      "dataset would under-describe them and split their recaptures off as",
+                      "new animals, so the replicate route gives every sample its own",
+                      "error rates, and the consensus route is reported alongside."),
+                100 * q$cut, 100 * q$typical), own)
+    else
+      tags$div(class = "gid-flag gid-ok", style = "margin-bottom:.6rem",
+        tags$b("The samples behave alike. "),
+        sprintf(paste("The typical sample's reactions disagree at %.0f%% of its replicated",
+                      "loci, and %d of %d exceed %.0f%%, so one error rate describes",
+                      "this dataset well."),
+                100 * q$typical, q$n_noisy, q$n, 100 * q$cut), own)
+  })
+
+  output$plot_rep_quality <- renderPlot({
+    d <- rep_quality(); d <- d[!is.na(d$discordance), , drop = FALSE]; req(nrow(d))
+    q <- gid_quality_spread(d)
+    g <- ggplot(d, aes(discordance)) +
+      geom_histogram(binwidth = 0.02, boundary = 0, fill = INK, colour = "white",
+                     linewidth = 0.3) +
+      labs(x = "Share of a sample's replicated loci whose reactions disagree",
+           y = "Samples",
+           subtitle = if (!is.null(q))
+             "Dashed line: the point past which a sample counts as much noisier than typical"
+           else NULL) +
+      theme_gid()
+    if (!is.null(q)) g <- g + geom_vline(xintercept = q$cut, colour = ACCENT, linetype = 2)
+    g
+  })
+
+  output$tbl_rep_quality <- renderDT({
+    d <- rep_quality()
+    d$discordance <- round(d$discordance, 3)
+    dt(d[order(-d$discordance, -d$loci_discordant), , drop = FALSE])
   })
 
   output$run_status_ind <- renderUI(run_status())
@@ -2074,27 +2430,33 @@ server <- function(input, output, session) {
   })
 
   ## ------------------------------------------------------- settings sensitivity
-  sens <- eventReactive(run_count(), ignoreInit = TRUE, {
+  ## Re-run on consensus genotypes, where each run takes a fraction of a
+  ## second, at the residual rates the consensus route uses.
+  sens <- eventReactive(run_count(), {
+    req(run_count() > 0)
     p <- prep(); req(p)
+    r <- res(); req(r)
+    cr <- r$rates$consensus
+    d0 <- signif(cr[["dropout"]], 3)
     grid <- expand.grid(
       post_cut = sort(unique(c(0.95, 0.99, 0.999, 0.9999, input$post_cut))),
-      dropout  = sort(unique(c(0.001, 0.01, 0.05, input$dropout))),
+      dropout  = sort(unique(c(0.001, 0.01, 0.05, d0))),
       kinship  = c("unrelated", "full_sib"),
       stringsAsFactors = FALSE)
     withProgress(message = "Re-running across settings", value = 0, {
       out <- do.call(rbind, lapply(seq_len(nrow(grid)), function(k) {
         incProgress(1 / nrow(grid))
-        r <- gid_by_group(p$gt, p$grp, gid_method_lr,
+        x <- gid_by_group(p$gt, p$grp, gid_method_lr,
                           dropout = grid$dropout[k],
-                          false_allele = input$false_allele,
+                          false_allele = cr[["false_allele"]],
                           kinship = grid$kinship[k], post_cut = grid$post_cut[k],
                           min_loci = input$min_loci, linkage = input$linkage,
                           prior_same = if (is.na(input$prior)) NULL else input$prior)
-        data.frame(grid[k, ], n_individuals = length(unique(r$assignment$individual)),
-                   n_conflicting = r$n_conflict, stringsAsFactors = FALSE)
+        data.frame(grid[k, ], n_individuals = length(unique(x$assignment$individual)),
+                   n_conflicting = x$n_conflict, stringsAsFactors = FALSE)
       }))
     })
-    out$current <- out$post_cut == input$post_cut & out$dropout == input$dropout &
+    out$current <- out$post_cut == input$post_cut & out$dropout == d0 &
       out$kinship == input$kinship
     out
   })
@@ -2124,43 +2486,68 @@ server <- function(input, output, session) {
 
   ## ------------------------------------------------------------------ output
   params <- reactive({
-    r <- res()
-    sprintf(paste0(
-      "genoID settings\n",
-      "----------------------------------------\n",
-      "file                 %s\n",
-      "samples analyzed     %d\n",
-      "loci used            %d  (%s)\n",
-      "loci dropped by you  %s\n",
-      "grouped by           %s\n",
-      "\nMethod shown on the Individuals tab: %s\n",
-      "\nProbabilistic method\n",
-      "  alternative        %s\n",
-      "  posterior cutoff   %s\n",
-      "  dropout rate       %s\n",
-      "  false allele rate  %s\n",
-      "  prior P(recapture) %s\n",
-      "  min loci per pair  %d\n",
-      "  cluster rule       %s\n",
-      "\nGut-check methods\n",
-      "  mismatch threshold %d loci\n",
-      "  Sethi et al. 2016  %s\n",
-      "  GenAlEx Matches    %s\n",
-      "\nResult: %d samples -> %d individuals\n"),
-      if (nzchar(source_name())) source_name() else "-", nrow(r$gt), ncol(r$gt),
-      paste(colnames(r$gt), collapse = " "),
-      if (length(setdiff(detected(), loci()))) paste(setdiff(detected(), loci()), collapse = " ") else "none",
-      if (nzchar(input$group_col %||% "")) input$group_col else "not grouped",
-      GID_METHODS[[input$method]]$label,
-      input$kinship, input$post_cut, input$dropout, input$false_allele,
-      if (is.na(input$prior)) "estimated from data" else as.character(input$prior),
-      input$min_loci, input$linkage, input$max_mismatch,
-      if (isTRUE(input$run_sethi))
-        sprintf("run, lambda > %s vs {%s}", input$lambda_cut,
-                paste(input$sethi_rel, collapse = ", ")) else "not run",
-      if (isTRUE(input$run_genalex))
-        sprintf("run, near matches within %d loci", input$near_match) else "not run",
-      nrow(r$gt), length(unique(best()$assignment$individual)))
+    r <- res(); req(r)
+    rr <- r$rates
+    two <- length(r$routes) == 2
+    num <- function(x) format(signif(x, 3), scientific = FALSE, drop0trailing = TRUE)
+    rate_line <- function(lab, v, src)
+      sprintf("  %-19s dropout %s, false allele %s  (%s)", lab, num(v[["dropout"]]),
+              num(v[["false_allele"]]), src)
+    oe <- r$own_error
+    route_lines <- if (two) unlist(lapply(names(r$route_cmp), function(k) {
+      rc <- r$route_cmp[[k]]
+      sprintf("  %-20s every replicate %d, consensus first %d, %d sample%s placed differently",
+              GID_METHODS[[k]]$label, rc$n_individuals[["replicates"]],
+              rc$n_individuals[["consensus"]], rc$n_moved, if (rc$n_moved == 1) "" else "s")
+    }))
+    paste(c(
+      "genoID settings",
+      "----------------------------------------",
+      sprintf("file                 %s", if (nzchar(source_name())) source_name() else "-"),
+      sprintf("samples analyzed     %d", nrow(r$gt)),
+      sprintf("loci used            %d  (%s)", ncol(r$gt), paste(colnames(r$gt), collapse = " ")),
+      sprintf("loci dropped by you  %s",
+              if (length(setdiff(detected(), loci()))) paste(setdiff(detected(), loci()), collapse = " ") else "none"),
+      sprintf("grouped by           %s",
+              if (nzchar(input$group_col %||% "")) input$group_col else "not grouped"),
+      "",
+      sprintf("Method shown on the Individuals tab: %s", GID_METHODS[[input$method]]$label),
+      sprintf("Genotypes shown:                     %s",
+              if (is.null(rr$reps)) "one genotype per sample"
+              else if (rr$primary == "reps") "every replicate reaction" else "consensus genotypes"),
+      "",
+      "Error model",
+      if (!is.null(rr$reps)) c(
+        rate_line("per reaction", rr$reps, rr$source[["reps"]]),
+        if (length(oe)) sprintf("  %-19s each sample's own error scale; %d of %d above 1, up to %s",
+                                "per sample", sum(oe > 1, na.rm = TRUE), length(oe),
+                                format(max(oe, na.rm = TRUE))),
+        rate_line("consensus calls", rr$consensus, rr$source[["consensus"]]))
+      else rate_line("per genotype", rr$consensus, rr$source[["consensus"]]),
+      "",
+      "Sethi et al. 2016",
+      sprintf("  relationships      %s",
+              if (length(input$sethi_rel)) paste(input$sethi_rel, collapse = ", ") else "none chosen, not run"),
+      sprintf("  accept when        lambda > %s", input$lambda_cut),
+      "",
+      "Likelihood ratio",
+      sprintf("  alternative        %s", input$kinship),
+      sprintf("  posterior cutoff   %s", input$post_cut),
+      sprintf("  prior P(recapture) %s",
+              if (is.na(input$prior)) "estimated from data" else as.character(input$prior)),
+      "",
+      "Shared",
+      sprintf("  min loci per pair  %d", input$min_loci),
+      sprintf("  cluster rule       %s", input$linkage),
+      sprintf("  mismatch threshold %d loci", input$max_mismatch),
+      sprintf("  GenAlEx Matches    %s",
+              if (isTRUE(input$run_genalex))
+                sprintf("run, near matches within %d loci", input$near_match) else "not run"),
+      "",
+      sprintf("Result: %d samples -> %d individuals", nrow(r$gt),
+              length(unique(best()$assignment$individual))),
+      if (two) c("", "Every replicate or a consensus first", route_lines)),
+      collapse = "\n")
   })
   output$params_txt <- renderText(params())
 
@@ -2228,57 +2615,96 @@ server <- function(input, output, session) {
               type = "text/plain;charset=utf-8")
   })
 
-  ## the exact gid_ call behind whatever the Individuals tab is showing
-  method_call <- reactive({
-    a <- function(...) paste(c(...), collapse = ",\n                     ")
-    switch(input$method,
-      probabilistic = sprintf("gid_method_lr,\n                     %s",
-        a(sprintf("dropout = %s", input$dropout),
-          sprintf("false_allele = %s", input$false_allele),
-          sprintf('kinship = "%s"', input$kinship),
-          sprintf("post_cut = %s", input$post_cut),
-          sprintf("min_loci = %s", input$min_loci),
-          sprintf('linkage = "%s"', input$linkage))),
-      sethi = sprintf("gid_method_sethi,\n                     %s",
-        a(sprintf("dropout = %s", input$dropout),
-          sprintf("false_allele = %s", input$false_allele),
-          sprintf('relationships = c("%s")', paste(input$sethi_rel, collapse = '", "')),
-          sprintf("lambda_cut = %s", input$lambda_cut),
-          sprintf("min_loci = %s", input$min_loci),
-          sprintf('linkage = "%s"', input$linkage))),
-      threshold = sprintf("gid_method_threshold,\n                     %s",
-        a(sprintf("max_mismatch = %s", input$max_mismatch),
-          sprintf("min_loci = %s", input$min_loci),
-          sprintf('linkage = "%s"', input$linkage))),
-      genalex = sprintf("gid_method_genalex,\n                     %s",
-        a(sprintf("near_match_loci = %s", input$near_match),
-          sprintf("min_loci = %s", input$min_loci),
-          sprintf('linkage = "%s"', input$linkage))),
-      exact = sprintf("gid_method_exact,\n                     %s",
-        a(sprintf("min_loci = %s", input$min_loci),
-          sprintf('linkage = "%s"', input$linkage))))
-  })
+  ## The gid_ call behind a method, at one route's error rates.
+  method_call <- function(key, rate = NULL, reps = FALSE) {
+    num  <- function(x) format(signif(x, 4), scientific = FALSE, drop0trailing = TRUE)
+    rt   <- if (!is.null(rate)) c(sprintf("dropout = %s", num(rate[["dropout"]])),
+                                  sprintf("false_allele = %s", num(rate[["false_allele"]])))
+    tail <- c(sprintf("min_loci = %s", input$min_loci), sprintf('linkage = "%s"', input$linkage))
+    body <- switch(key,
+      sethi = c(rt, sprintf('relationships = c("%s")', paste(input$sethi_rel, collapse = '", "')),
+                sprintf("lambda_cut = %s", input$lambda_cut), tail),
+      probabilistic = c(rt, sprintf('kinship = "%s"', input$kinship),
+                        sprintf("post_cut = %s", input$post_cut),
+                        if (!is.na(input$prior)) sprintf("prior_same = %s", input$prior), tail),
+      threshold = c(sprintf("max_mismatch = %s", input$max_mismatch), tail),
+      genalex = c(sprintf("near_match_loci = %s", input$near_match), tail),
+      exact = tail)
+    fn <- c(sethi = "gid_method_sethi", probabilistic = "gid_method_lr",
+            threshold = "gid_method_threshold", genalex = "gid_method_genalex",
+            exact = "gid_method_exact")[[key]]
+    sprintf("%s,\n                     %s", fn,
+            paste(c(body, if (reps) "reps = reps"), collapse = ",\n                     "))
+  }
 
   observeEvent(input$dl_script, {
     req(input$id_col, length(loci()) > 0)
-    send_file("genoID_reproduce.R", sprintf(paste0(
-      '## Reproduces exactly what the genoID app just did.\n',
-      'source("genoID_core.R")\n\n',
-      'raw  <- gid_read("%s")\n',
-      'loci <- c(%s)\n',
-      'gt   <- gid_matrix(raw, "%s", loci)\n',
-      'f    <- gid_filter(gt, min_locus_call = %s, min_sample_call = %s)\n',
-      'grp  <- %s\n\n',
-      'res  <- gid_by_group(f$gt, grp, %s)\n\n',
-      'write.csv(res$assignment, "individual_assignments.csv", row.names = FALSE)\n'),
-      input$file$name %||% "genotypes.csv",
-      paste0('"', paste(loci(), collapse = '", "'), '"'),
-      input$id_col, input$min_locus_call, input$min_sample_call,
-      if (nzchar(input$group_col %||% ""))
-        sprintf('raw[["%s"]][match(rownames(f$gt), raw[["%s"]])]',
-                input$group_col, input$id_col)
-      else 'rep("all", nrow(f$gt))',
-      method_call()), type = "text/plain;charset=utf-8")
+    r <- tryCatch(res(), error = function(e) NULL)
+    p <- tryCatch(prep(), error = function(e) NULL)
+    key <- input$method
+    lik <- key %in% c("sethi", "probabilistic")
+    on_reps <- !is.null(p$reps_all)
+    rr <- r$rates %||% list(primary = "consensus",
+                            consensus = c(dropout = input$dropout, false_allele = input$false_allele))
+    q  <- function(x) paste0('"', paste(x, collapse = '", "'), '"')
+    id <- input$id_col
+    flags <- if (isTRUE(input$drop_flagged)) ", strip_flags = FALSE" else ""
+    grp <- if (nzchar(input$group_col %||% ""))
+      sprintf('raw[["%s"]][match(rownames(f$gt), raw[["%s"]])]', input$group_col, id)
+      else 'rep("all", nrow(f$gt))'
+    other <- setdiff(c("reps", "consensus"), rr$primary)
+    lines <- c(
+      "## Reproduces what the genoID app just did.",
+      'source("genoID_core.R")',
+      "",
+      sprintf('raw  <- gid_read("%s")', input$file$name %||% "genotypes.csv"),
+      sprintf('raw  <- raw[!gid_blank_ids(raw, "%s"), ]', id),
+      if (on_reps && length(input$rep_drop))
+        sprintf('raw  <- raw[!raw[["%s"]] %%in%% c(%s), ]   # rows excluded in the app',
+                input$rep_col, q(input$rep_drop)),
+      sprintf("loci <- c(%s)", q(loci())),
+      if (on_reps) c(
+        "",
+        "## one row per PCR reaction, then a consensus genotype per sample",
+        sprintf('rgt  <- gid_matrix(raw, "%s", loci%s)', id, flags),
+        sprintf('rsm  <- as.character(raw[["%s"]])', id),
+        sprintf("gt   <- gid_consensus_from_reps(rgt, rsm, hom_n = %d, het_n = %d)",
+                p$hom_n, p$het_n))
+      else sprintf('gt   <- gid_matrix(raw, "%s", loci%s)', id, flags),
+      sprintf("f    <- gid_filter(gt, min_locus_call = %s, min_sample_call = %s)",
+              input$min_locus_call, input$min_sample_call),
+      if (isTRUE(input$drop_mixtures)) c(
+        sprintf("mx   <- gid_mixture_check(f$gt, alpha = 0.05, excess_cut = %s, min_loci = %d)",
+                input$mix_cut, max(10L, as.integer(input$min_loci))),
+        'f$gt <- f$gt[setdiff(rownames(f$gt), mx$sample[mx$flag == "possible mixture"]), , drop = FALSE]'),
+      if (on_reps) "reps <- list(gt = rgt[, colnames(f$gt)], sample = rsm)",
+      sprintf("grp  <- %s", grp),
+      "")
+    if (lik && on_reps) {
+      cf <- function(route) method_call(key, rr[[route]], reps = route == "reps")
+      lines <- c(lines,
+        "## The error rates are the ones the app used: per reaction for the route that",
+        "## uses every replicate, and the residual rate of a consensus call for the",
+        "## other. gid_estimate_error(f$gt, reps) measures the per-reaction pair afresh,",
+        "## and each sample's own error scale is measured inside the method.",
+        sprintf("res  <- gid_by_group(f$gt, grp, %s)   # %s, as the app showed",
+                cf(rr$primary), route_label(rr$primary)),
+        if (!is.null(rr[[other]])) c(
+          "",
+          sprintf("## the other route: %s", route_label(other)),
+          sprintf("res_other <- gid_by_group(f$gt, grp, %s)", cf(other)),
+          sprintf("print(gid_compare_routes(%s)$moved)   # samples the routes place differently",
+                  if (rr$primary == "reps") "res, res_other" else "res_other, res")),
+        "")
+    } else
+      lines <- c(lines,
+        sprintf("res  <- gid_by_group(f$gt, grp, %s)",
+                method_call(key, if (lik) rr$consensus)), "")
+    if (identical(key, "probabilistic") && isTRUE(input$use_spatial))
+      lines <- c(lines, "## The app also added spatial evidence (gid_apply_spatial), not repeated here.")
+    lines <- c(lines, 'write.csv(res$assignment, "individual_assignments.csv", row.names = FALSE)')
+    send_file("genoID_reproduce.R", paste(c(lines, ""), collapse = "\n"),
+              type = "text/plain;charset=utf-8")
   })
 
   ## The bundle. Zipping needs a compiled package and a writable filesystem,
@@ -2301,6 +2727,21 @@ server <- function(input, output, session) {
       individual_genotypes   = data.frame(individual = rownames(ic$genotypes),
                                           ic$genotypes))
     if (!is.null(best()$conflicts)) parts$cluster_conflicts <- best()$conflicts
+    ## both routes, side by side, when the file had replicates
+    if (length(r$routes) == 2) {
+      ar <- data.frame(sample = rownames(r$gt), stringsAsFactors = FALSE)
+      for (k in names(r$route_cmp)) for (rt in c("reps", "consensus")) {
+        a <- r$routes[[rt]][[k]]$assignment
+        ar[[sprintf("%s_%s", k, if (rt == "reps") "every_reaction" else "consensus_first")]] <-
+          a$individual[match(ar$sample, a$sample)]
+      }
+      if (!is.null(r$own_error)) ar$own_error <- unname(r$own_error[ar$sample])
+      parts$assignments_by_route <- ar
+      mv <- route_moved()
+      if (nrow(mv)) parts$samples_placed_differently_by_route <- mv
+    }
+    rq <- tryCatch(rep_quality(), error = function(e) NULL)
+    if (!is.null(rq)) parts$replicate_consistency <- rq
     ## the mapped samples, if coordinates were supplied
     geo <- map_api$table()
     if (!is.null(geo) && nrow(geo)) parts$scat_map <- geo

@@ -53,8 +53,8 @@ anywhere — the file is written and read in your browser.
 | **Exact match** | Identical at every co-typed locus | Baseline sanity check |
 | **Mismatch threshold** | Allow up to *k* differing loci; sweeps *k* to show how sensitive the answer is | The field standard (Paetkau 2003) |
 | **GenAlEx Matches** | Reproduces GenAlEx's Multilocus → Matches: match distribution, near-match list, P(ID) / P(ID)<sub>sib</sub> | Continuity with what your lab already runs |
-| **Likelihood ratio** | Explicit dropout / false-allele error model, tested against a stated alternative (unrelated, half sib, full sib, parent–offspring), returning a posterior probability per pair | **Recommended** |
-| **Sethi et al. (2016)** | Same likelihood, but divided by whichever relationship best explains the pair — so you don't pick one — and decided on evidence alone (Λ > 1) | **Recommended** |
+| **Sethi et al. (2016)** | Explicit dropout / false-allele error model, divided by whichever relationship best explains the pair (unrelated, full sib, parent–offspring) — so you don't pick one — and decided on evidence alone (Λ > 1) | **The default** |
+| **Likelihood ratio** | The same likelihood, tested against one alternative you name (unrelated, half sib, full sib, parent–offspring), returning a posterior probability per pair | **Recommended** |
 
 ### Optional: where the sample was found
 
@@ -113,29 +113,34 @@ ratio method converts evidence to a posterior using a prior estimated from the
 data, which is stricter on large datasets. Run both and report the range they
 bracket — on the AITRC wolf dataset that is 59 to 63 animals.
 
+**Sethi is what the app shows unless you choose otherwise.** It asks the least
+of a newcomer — no alternative to name, no prior to defend — and in the
+simulations below it never split recaptures off more often than the likelihood
+ratio did, with neither ever joining two animals. The likelihood ratio always
+runs alongside it, and the Method comparison tab explains every pair the two
+decide differently.
+
 ## Try it without your own data
 
 Click **"or load the example dataset"** in the sidebar. It's 55 simulated
-samples from 28 known individuals across two species, generated with 3% allelic
-dropout and 1% false alleles. The true answer is in the `TrueIndividual` column,
-so you can score any method against it:
+samples from 28 known individuals across two species, each amplified three
+times at 1.5% dropout and 0.2% false alleles per reaction, followed by the lab's
+consensus row. The true answer is in the `TrueIndividual` column, so you can
+score any method against it.
 
-| Method | Individuals found (truth: 28) | Agreement with truth |
-|---|---|---|
-| Exact match | 47 | 0.22 |
-| GenAlEx Matches | 47 | 0.22 |
-| Mismatch threshold | 35 | 0.86 |
-| Likelihood ratio | 30 | 0.98 |
-| **Sethi et al. (2016)** | **28** | **1.00** |
-
-Sethi et al. recovers the truth exactly. That gap — 47 animals versus 28 — is
-what a 3% dropout rate does to methods that only count differences.
+Press **Identify individuals** without touching anything. The app measures the
+error rates from the replicates (dropout comes back near 1.4%), gives the one
+noisy sample its own error scale, and finds the 28 animals by every method and
+by both routes: three reactions per sample wash most errors out. The Data & QC
+tab shows how alike the samples' replicates are, and the Method comparison tab
+confirms the two routes agree on every sample.
 
 ## PCR replicates
 
 If your file has several rows per sample — one per PCR replicate — the app
-detects it and offers to **use every replicate observation directly** instead of
-collapsing them to a consensus first. The two likelihood methods extend
+detects it and **runs both routes**: every replicate reaction used directly, and
+the reactions collapsed to a consensus first. Both are reported side by side;
+you choose which one the results tabs show. The two likelihood methods extend
 naturally: for sample *i* at locus *ℓ* with replicate observations
 *o*₁…*o*<sub>R</sub>, the genotype likelihood is
 
@@ -147,32 +152,52 @@ and it drops straight into the same two hypotheses. Missing observations
 contribute a factor of 1, which makes both hypotheses collapse to the same
 marginal — so missing data says nothing rather than needing a special rule.
 
-**Does it help?** Across 180 simulations with a known answer (20–40 loci, 3–25%
-dropout), the replicate route landed closer to the truth in 114 cases, the
-consensus route in 3, and they tied in 63. The gain appears where you are
-marginal:
+**Every sample gets its own error rates.** One pair of rates describes the
+typical sample, and scat is not typical: a minority of old or wet samples err
+many times as often as the rest. Held to the typical rate, the model reads their
+disagreements with themselves as differences between animals and splits their
+recaptures off as new individuals. So the replicate route gives each sample one
+multiplier on both rates, measured from its own replicated loci, never below 1,
+and left at 1 unless its reactions reject that. The Data & QC tab shows how much
+your samples differ before anything is run.
 
-| Situation | What replicates buy |
-|---|---|
-| Plenty of loci, low dropout | Nothing measurable — both already recover the truth |
-| 30 loci, 25% dropout | Agreement with truth 0.73 → **0.97** |
-| Too few loci for the job | Not enough; replicates cannot manufacture information the panel never had |
+**Does it help?** With uniform sample quality, using every replicate helps
+where the panel is marginal: across 180 simulations (20–40 loci, 3–25% dropout)
+it landed closer to the truth in 114 cases, the consensus route in 3, and they
+tied in 63 (`Rscript compare_reps_vs_consensus.R`). With mixed quality, one
+shared rate is the weak point. Share of true recapture pairs each route failed
+to join, eight simulated datasets per scenario:
 
-What improves unconditionally is the **margin** — the gap between the weakest
-true recapture and the strongest coincidental match. It roughly doubled in every
-condition tested. That does not change an answer that was already right, but it
-means the answer survives a worse choice of threshold.
+| Route | Uniform quality | 30% noisy samples | 15% very noisy | 10% false-allele prone |
+|---|---|---|---|---|
+| Consensus first, Sethi | 0.0% | 1.3% | 0.0% | 0.0% |
+| Consensus first, likelihood ratio | 0.0% | 2.6% | 3.0% | 1.4% |
+| Every replicate, one rate, Sethi | 0.0% | 0.0% | 1.9% | 0.0% |
+| Every replicate, one rate, likelihood ratio | 0.0% | 0.8% | 7.6% | 0.7% |
+| **Every replicate, own rates, Sethi** | 0.0% | 0.0% | 0.0% | 0.0% |
+| **Every replicate, own rates, likelihood ratio** | 0.0% | 0.3% | 0.0% | 0.0% |
 
-Reproduce the experiment with `Rscript compare_reps_vs_consensus.R`.
+No route joined two different animals in any dataset. Reproduce it with
+`Rscript compare_sample_quality.R`.
 
-> **Watch the error rates.** With replicates you supply *per-reaction* dropout
-> and false-allele rates (a few percent). With consensus genotypes you supply the
-> much smaller residual rates that survive the multi-tube rule (a few tenths of a
-> percent). Mixing them up is the easiest way to get this wrong, so the app says
-> which one it wants.
+**Why both routes are reported.** They assume different things about error.
+The consensus route treats every consensus call as equally reliable and refuses
+to call a locus whose reactions disagree; the replicate route assumes a
+sample's reactions err independently at that sample's rate, which an error
+repeated in all of one extract's reactions breaks. Where they agree, the count
+does not depend on the choice. Where they disagree, the Method comparison tab
+lists the samples — those are the ones to check by hand before you report a
+number.
+
+> **Watch the error rates.** The replicate route wants *per-reaction* dropout
+> and false-allele rates (a few percent). The consensus route wants the much
+> smaller residual rates that survive the multi-tube rule. The app keeps both:
+> leave the sliders alone and it measures the per-reaction rates from your
+> replicates when you run the analysis, then works out the consensus rates from
+> them. The sliders show the rate for the route on screen.
 
 Only the two likelihood methods can use replicates. Exact matching, the mismatch
-threshold and GenAlEx compare one genotype per sample, so they keep running on a
+threshold and GenAlEx compare one genotype per sample, so they always run on the
 consensus and the comparison tab stays meaningful.
 
 ## Your file format
@@ -348,9 +373,10 @@ raw  <- gid_read("genotypes.csv")
 loci <- setdiff(gid_detect_loci(raw, exclude = "SampleID"), c("SexMarker", "DIAG01"))
 gt   <- gid_matrix(raw, "SampleID", loci)
 
-res <- gid_by_group(gt, raw$Species, gid_method_lr,
+res <- gid_by_group(gt, raw$Species, gid_method_sethi,
                     dropout = 0.005, false_allele = 0.002,
-                    kinship = "full_sib", post_cut = 0.999, min_loci = 15)
+                    relationships = c("unrelated", "full_sib", "parent_offspring"),
+                    min_loci = 15)
 
 write.csv(res$assignment, "individuals.csv", row.names = FALSE)
 ```
@@ -362,11 +388,29 @@ gid_error_from_fis(gt)                  # rough dropout from a heterozygote defi
 gid_propagate_error(d, f, rule = "taberlet")   # per-reaction -> consensus residual
 ```
 
+With one row per PCR reaction, pass the reactions and the methods condition on
+every one, each sample at its own error scale:
+
+```r
+reps <- list(gt = rep_gt, sample = rep_sample_ids)   # one row per reaction
+gt   <- gid_consensus_from_reps(rep_gt, rep_sample_ids)
+e    <- gid_estimate_error(gt, reps)                  # per-reaction rates
+a    <- gid_method_sethi(gt, dropout = e$dropout, false_allele = e$false_allele,
+                         reps = reps)                 # every reaction
+r    <- gid_propagate_error(e$dropout, e$false_allele)
+b    <- gid_method_sethi(gt, dropout = max(r[["dropout"]], 1e-4),
+                         false_allele = max(r[["false_allele"]], 1e-4))   # consensus
+gid_compare_routes(a, b)$moved                         # samples the routes disagree on
+gid_replicate_discordance(rep_gt, rep_sample_ids)      # how noisy each sample is
+```
+
 ## Where do the error rates come from?
 
 Guessing the dropout and false-allele rates is the weakest link in the analysis,
 and you usually don't have to. Press **Estimate these from my data** in the
-sidebar; the app picks the best method your data supports.
+sidebar; the app picks the best method your data supports. With replicates in
+the file, it measures them on its own when you run the analysis, unless you have
+set the sliders yourself.
 
 | What you have | Method | On the AITRC panel |
 |---|---|---|
@@ -381,8 +425,10 @@ analyzing consensus calls.
 > **The rate depends on what you're analyzing.** Raw replicates want the
 > per-reaction rate (a few percent). Consensus calls want the much smaller
 > residual rate that survives the multi-tube rule (a few tenths of a percent) —
-> a factor of ~300 apart on this panel. The app measures the per-reaction rate
-> and converts automatically when you're on consensus calls.
+> a factor of ~300 apart on this panel. The app measures the per-reaction rate,
+> works out the residual rate exactly, and uses each for its own route. No
+> residual rate is set below one in ten thousand: a swapped tube does not care
+> how many reactions agreed.
 
 **A trap worth knowing.** The standard Broquet & Petit estimator scores each
 replicate against a consensus. If your consensus calls a homozygote only when
