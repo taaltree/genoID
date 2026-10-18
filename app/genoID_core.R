@@ -280,6 +280,29 @@ gid_allele_freq <- function(gt, weights = NULL) {
 }
 
 
+#' Make sure every allele in `gt` has a frequency.
+#'
+#' Frequencies are usually taken from consensus genotypes, while likelihoods
+#' are evaluated on the replicate reactions. An allele that only a replicate
+#' carries -- a false allele at a locus the consensus calls monomorphic -- then
+#' has no frequency, and looking it up fails. Such alleles get the weight of
+#' one copy among the genotypes observed at that locus.
+gid_freq_cover <- function(freqs, gt) {
+  for (L in colnames(gt)) {
+    g <- gt[!is.na(gt[, L]), L]
+    if (!length(g)) next
+    seen <- unique(unlist(strsplit(g, "/", fixed = TRUE)))
+    p <- freqs[[L]]
+    new <- setdiff(seen, names(p))
+    if (!length(new)) next
+    one <- 1 / (2 * length(g))
+    p <- if (length(p)) p * (1 - one * length(new)) else numeric(0)
+    freqs[[L]] <- c(p, setNames(rep(if (length(p)) one else 1 / length(new), length(new)), new))
+  }
+  freqs
+}
+
+
 #' Probability of identity, unrelated and full-sib (Waits, Luikart & Taberlet 2001).
 gid_pid <- function(freqs, n = NULL) {
   res <- do.call(rbind, lapply(names(freqs), function(L) {
@@ -443,6 +466,7 @@ gid_error_ml <- function(rep_gt, sample_ids, freqs = NULL,
     fr  <- if (per_group_freqs) freqs[[gg]]
            else if (!is.null(freqs) && length(gl) == 1) freqs
            else gid_allele_freq(rg)
+    fr  <- gid_freq_cover(fr, rg)
     bl <- lapply(loci, function(L) {
       v <- split(rg[, L], sid)
       v <- lapply(v, function(z) z[!is.na(z)])
@@ -587,7 +611,9 @@ gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
       ml <- try(gid_error_ml(reps$gt, reps$sample, freqs = freqs, min_reps = min_reps,
                              groups = rep_groups, progress = progress),
                 silent = TRUE)
-      if (!inherits(ml, "try-error"))
+      if (inherits(ml, "try-error"))
+        ml_error <- conditionMessage(attr(ml, "condition"))
+      else
         return(list(method = "replicates",
                     dropout = unname(ml[["dropout"]]),
                     false_allele = unname(ml[["false_allele"]]),
@@ -599,12 +625,15 @@ gid_estimate_error <- function(gt, reps = NULL, freqs = NULL, min_reps = 2,
     }
   }
 
+  ## Reaching here with replicates in hand means the fit failed; say so rather
+  ## than passing the rough estimate off as all the data allowed.
   f <- gid_error_from_fis(gt_u)
   list(method = "heterozygote deficit",
        dropout = f$dropout, false_allele = NA_real_,
        dropout_ci = c(NA_real_, NA_real_), false_ci = c(NA_real_, NA_real_),
        scale = "per genotype, approximate",
-       n_samples = nrow(gt_u), detail = f)
+       n_samples = nrow(gt_u), detail = f,
+       ml_error = if (exists("ml_error", inherits = FALSE)) ml_error else NULL)
 }
 
 
